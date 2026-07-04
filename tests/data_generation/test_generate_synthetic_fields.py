@@ -96,3 +96,25 @@ def test_generate_new_device_flag_fraud_rate_matches_spec():
     is_fraud = np.ones(50_000, dtype=int)
     result = gsf.generate_new_device_flag(is_fraud, rng)
     assert result.mean() == pytest.approx(0.12, abs=0.01)
+
+
+def test_generate_account_age_days_base_median_matches_spec():
+    rng = np.random.default_rng(0)
+    is_fraud = np.zeros(100_000, dtype=int)
+    result = gsf.generate_account_age_days(is_fraud, rng)
+    assert np.median(result) == pytest.approx(400, rel=0.1)
+
+
+def test_generate_account_age_days_fraud_median_lower_than_base():
+    rng = np.random.default_rng(0)
+    is_fraud = np.ones(100_000, dtype=int)
+    result = gsf.generate_account_age_days(is_fraud, rng)
+    assert np.median(result) == pytest.approx(150, rel=0.15)
+
+
+def test_generate_account_age_days_respects_bounds():
+    rng = np.random.default_rng(0)
+    is_fraud = np.random.default_rng(1).integers(0, 2, size=10_000)
+    result = gsf.generate_account_age_days(is_fraud, rng)
+    assert result.min() >= 1
+    assert result.max() <= 3650

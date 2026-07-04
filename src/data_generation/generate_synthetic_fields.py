@@ -48,3 +48,18 @@ NEW_DEVICE_FLAG_FRAUD_P = 0.12
 
 def generate_new_device_flag(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return generate_conditional_bernoulli(is_fraud, NEW_DEVICE_FLAG_BASE_P, NEW_DEVICE_FLAG_FRAUD_P, rng)
+
+
+ACCOUNT_AGE_BASE_MEDIAN_DAYS = 400
+ACCOUNT_AGE_FRAUD_MEDIAN_DAYS = 150
+ACCOUNT_AGE_SIGMA = 0.6
+ACCOUNT_AGE_MIN_DAYS = 1
+ACCOUNT_AGE_MAX_DAYS = 3650
+
+
+def generate_account_age_days(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    median = np.where(is_fraud == 1, ACCOUNT_AGE_FRAUD_MEDIAN_DAYS, ACCOUNT_AGE_BASE_MEDIAN_DAYS)
+    mu = np.log(median.astype("float64"))
+    raw = rng.lognormal(mean=mu, sigma=ACCOUNT_AGE_SIGMA)
+    clipped = np.clip(raw, ACCOUNT_AGE_MIN_DAYS, ACCOUNT_AGE_MAX_DAYS)
+    return clipped.round().astype("int32")
