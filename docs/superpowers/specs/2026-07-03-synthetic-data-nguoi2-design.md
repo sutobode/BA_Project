@@ -46,7 +46,7 @@ Quy ước: `base` = phân phối/xác suất khi `isFraud=0`; `fraud` = khi `is
 |---|---|---|---|---|---|
 | 1 | `hour_of_day` | Derived | `(step - 1) % 24` | — | Suy trực tiếp từ `step`, không cần giả định. |
 | 2 | `is_night_transaction` | Derived | `hour_of_day ∈ [0,5]` | — | Định nghĩa "đêm" = 0h–6h, quy ước phổ biến trong các nghiên cứu fraud theo giờ. |
-| 3 | `customer_account_age_days` | Conditional (lognormal) | median ≈ 400 ngày | median ≈ 150 ngày (~0.4x) | Tài khoản bị chiếm đoạt/tài khoản mule thường được tạo gần đây hơn tài khoản lâu năm bình thường — hệ số 0.4x là giả định thận trọng, không suy từ số liệu thực (đề bài yêu cầu ghi rõ đây là business assumption). |
+| 3 | `customer_account_age_days` | Conditional (lognormal) | median ≈ 400 ngày | median ≈ 150 ngày (~0.4x)¹ | Tài khoản bị chiếm đoạt/tài khoản mule thường được tạo gần đây hơn tài khoản lâu năm bình thường — hệ số 0.4x là giả định thận trọng, không suy từ số liệu thực (đề bài yêu cầu ghi rõ đây là business assumption). |
 | 4 | `device_id` | Độc lập | pool cố định 50.000 UUID (Faker) | giống base | Không tự thân là tín hiệu fraud; tín hiệu nằm ở field `new_device_flag` (#7), tránh trùng lặp thông tin. |
 | 5 | `browser` | Độc lập | Chrome 55% / Safari 20% / Edge 12% / Firefox 8% / Khác 5% | giống base | Không có cơ sở hành vi để gắn với fraud — cố ý để trung lập nhằm tránh over-signal giả tạo. |
 | 6 | `device_type` | Độc lập | mobile 65% / desktop 30% / tablet 5% | giống base | Tương tự #5. |
@@ -56,6 +56,8 @@ Quy ước: `base` = phân phối/xác suất khi `isFraud=0`; `fraud` = khi `is
 | 10 | `ip_billing_distance_km` | **Derived** từ #8, #9 | haversine(centroid[ip_country], centroid[billing_country]) | — | Tính trực tiếp từ 2 field trên bằng bảng tọa độ trung tâm quốc gia cố định — đảm bảo **nhất quán nội tại** (không random riêng distance rồi mâu thuẫn với mismatch flag). |
 | 11 | `shipping_billing_mismatch` | Conditional (Bernoulli) | p = 0.05 | p = 0.15 (3x) | Một số khách hàng hợp pháp có địa chỉ giao khác địa chỉ đăng ký (quà tặng, công ty); fraud tăng vì kẻ gian có thể đổi hướng nhận tiền/hàng. Ghi rõ trong dictionary: khái niệm được diễn giải lại thành "địa chỉ giao dịch khác địa chỉ đăng ký" do bản chất fraud của PaySim là account-takeover, không phải checkout thẻ. |
 | 12 | `failed_payment_attempts_24h` | Conditional (Poisson) | λ = 0.15 | λ = 0.6 (4x) | Đa số giao dịch hợp pháp không có lần thất bại trước đó; kẻ gian thường thử nhiều lần (dò mật khẩu/thẻ) trước khi thành công. |
+
+¹ Khi chạy leakage check (mục 5) trên dữ liệu thật, `customer_account_age_days` ban đầu vượt ngưỡng (AUC 0.8753). Theo đúng quy trình mục 5, hệ số fraud được giảm bớt (median 150 → 275 ngày, tức 0.4x → 0.6875x) và sinh lại, đạt AUC 0.6689 (PASS). Xem commit `ebfe5cc` và `docs/DATA_DICTIONARY.md` để biết giá trị cuối cùng đã dùng.
 
 ## 5. Cơ chế chống leakage (bắt buộc)
 
