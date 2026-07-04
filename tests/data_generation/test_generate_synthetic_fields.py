@@ -169,3 +169,28 @@ def test_generate_ip_billing_distance_km_positive_when_countries_differ():
     billing = np.array(["VN"])
     result = gsf.generate_ip_billing_distance_km(ip, billing)
     assert result[0] > 10000
+
+
+def test_generate_shipping_billing_mismatch_uses_spec_probabilities():
+    rng = np.random.default_rng(2)
+    n = 50_000
+    base_rate = gsf.generate_shipping_billing_mismatch(np.zeros(n, dtype=int), rng).mean()
+    fraud_rate = gsf.generate_shipping_billing_mismatch(np.ones(n, dtype=int), rng).mean()
+    assert base_rate == pytest.approx(0.05, abs=0.01)
+    assert fraud_rate == pytest.approx(0.15, abs=0.01)
+
+
+def test_generate_failed_payment_attempts_24h_means_match_spec():
+    rng = np.random.default_rng(3)
+    n = 50_000
+    base_mean = gsf.generate_failed_payment_attempts_24h(np.zeros(n, dtype=int), rng).mean()
+    fraud_mean = gsf.generate_failed_payment_attempts_24h(np.ones(n, dtype=int), rng).mean()
+    assert base_mean == pytest.approx(0.15, abs=0.02)
+    assert fraud_mean == pytest.approx(0.6, abs=0.03)
+
+
+def test_generate_failed_payment_attempts_24h_non_negative():
+    rng = np.random.default_rng(4)
+    is_fraud = rng.integers(0, 2, size=1000)
+    result = gsf.generate_failed_payment_attempts_24h(is_fraud, rng)
+    assert (result >= 0).all()

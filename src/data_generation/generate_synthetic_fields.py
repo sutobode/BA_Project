@@ -96,3 +96,20 @@ def generate_ip_country(billing_country: np.ndarray, is_fraud: np.ndarray, rng: 
 
 def generate_ip_billing_distance_km(ip_country: np.ndarray, billing_country: np.ndarray) -> np.ndarray:
     return distance_between_countries(ip_country, billing_country)
+
+
+SHIPPING_MISMATCH_BASE_P = 0.05
+SHIPPING_MISMATCH_FRAUD_P = 0.15
+
+
+def generate_shipping_billing_mismatch(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    return generate_conditional_bernoulli(is_fraud, SHIPPING_MISMATCH_BASE_P, SHIPPING_MISMATCH_FRAUD_P, rng)
+
+
+FAILED_ATTEMPTS_BASE_LAMBDA = 0.15
+FAILED_ATTEMPTS_FRAUD_LAMBDA = 0.6
+
+
+def generate_failed_payment_attempts_24h(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    lam = np.where(is_fraud == 1, FAILED_ATTEMPTS_FRAUD_LAMBDA, FAILED_ATTEMPTS_BASE_LAMBDA)
+    return rng.poisson(lam).astype("int16")
