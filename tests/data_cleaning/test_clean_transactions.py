@@ -137,3 +137,25 @@ def test_flag_amount_outliers_flags_nothing_for_tight_distribution():
     amounts = pd.Series([10.0, 11.0, 12.0, 10.5, 11.5, 10.2, 11.8])
     result = ct.flag_amount_outliers(amounts)
     assert not result.any()
+
+
+def test_flag_zero_amount_flags_only_zero_values():
+    amounts = pd.Series([0.0, 10.0, 0.0, 5.0])
+    result = ct.flag_zero_amount(amounts)
+    assert list(result) == [True, False, True, False]
+
+
+def test_flag_balance_inconsistency_flags_mismatched_rows():
+    old = pd.Series([100.0, 100.0, 50.0])
+    amount = pd.Series([30.0, 30.0, 20.0])
+    new = pd.Series([70.0, 60.0, 30.0])
+    result = ct.flag_balance_inconsistency(old, amount, new)
+    assert list(result) == [False, True, False]
+
+
+def test_flag_balance_inconsistency_respects_tolerance():
+    old = pd.Series([100.0])
+    amount = pd.Series([30.0])
+    new = pd.Series([70.005])
+    result = ct.flag_balance_inconsistency(old, amount, new)
+    assert list(result) == [False]

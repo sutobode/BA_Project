@@ -63,3 +63,18 @@ def flag_amount_outliers(amount: pd.Series) -> pd.Series:
     lower = q1 - 1.5 * iqr
     upper = q3 + 1.5 * iqr
     return (amount < lower) | (amount > upper)
+
+
+def flag_zero_amount(amount: pd.Series) -> pd.Series:
+    """amount == 0 transactions are flagged, not removed - observed real-data
+    zero-amount CASH_OUT rows are all confirmed fraud (isFraud=1)."""
+    return amount == 0
+
+
+def flag_balance_inconsistency(
+    old_balance_org: pd.Series, amount: pd.Series, new_balance_orig: pd.Series, tolerance: float = 0.01
+) -> pd.Series:
+    """Flags rows where oldbalanceOrg - amount != newbalanceOrig beyond tolerance.
+    This is a known PaySim data characteristic (destination/merchant balances
+    often untracked), not a data-entry error - flagged, not removed."""
+    return (old_balance_org - amount - new_balance_orig).abs() > tolerance
