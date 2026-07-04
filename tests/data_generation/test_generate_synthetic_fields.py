@@ -194,3 +194,61 @@ def test_generate_failed_payment_attempts_24h_non_negative():
     is_fraud = rng.integers(0, 2, size=1000)
     result = gsf.generate_failed_payment_attempts_24h(is_fraud, rng)
     assert (result >= 0).all()
+
+
+REQUIRED_SYNTHETIC_COLUMNS = {
+    "hour_of_day", "is_night_transaction", "customer_account_age_days",
+    "device_id", "browser", "device_type", "new_device_flag",
+    "billing_country", "ip_country", "ip_billing_distance_km",
+    "shipping_billing_mismatch", "failed_payment_attempts_24h",
+}
+
+
+def test_generate_all_synthetic_fields_adds_all_required_columns():
+    df = pd.DataFrame({"step": np.arange(1, 201), "isFraud": [0] * 190 + [1] * 10})
+    result = gsf.generate_all_synthetic_fields(df, seed=42)
+    assert REQUIRED_SYNTHETIC_COLUMNS.issubset(result.columns)
+    assert len(result) == len(df)
+
+
+def test_generate_all_synthetic_fields_is_reproducible_with_same_seed():
+    df = pd.DataFrame({"step": np.arange(1, 101), "isFraud": [0] * 95 + [1] * 5})
+    r1 = gsf.generate_all_synthetic_fields(df, seed=42)
+    r2 = gsf.generate_all_synthetic_fields(df, seed=42)
+    pd.testing.assert_frame_equal(r1, r2)
+
+
+def test_generate_all_synthetic_fields_preserves_original_columns_and_row_count():
+    df = pd.DataFrame({"step": [1, 2, 3], "isFraud": [0, 0, 1], "amount": [10.0, 20.0, 30.0]})
+    result = gsf.generate_all_synthetic_fields(df, seed=1)
+    assert list(result["amount"]) == [10.0, 20.0, 30.0]
+    assert len(result) == 3
+
+
+def test_load_raw_transactions_applies_expected_dtypes(tmp_path):
+    csv_content = (
+        "step,type,amount,nameOrig,oldbalanceOrg,newbalanceOrig,nameDest,oldbalanceDest,newbalanceDest,isFraud,isFlaggedFraud\n"
+        "1,PAYMENT,9839.64,C123,170136.0,160296.36,M456,0.0,0.0,0,0\n"
+        "1,TRANSFER,181.0,C789,181.0,0.0,C999,0.0,0.0,1,0\n"
+    )
+    csv_path = tmp_path / "sample.csv"
+    csv_path.write_text(csv_content)
+    df = gsf.load_raw_transactions(str(csv_path))
+    assert len(df) == 2
+    assert df["isFraud"].tolist() == [0, 1]
+    assert str(df["type"].dtype) == "category"
+
+
+def test_build_stratified_sample_preserves_fraud_ratio_approximately():
+    n = 10_000
+    df = pd.DataFrame({"step": np.arange(1, n + 1), "isFraud": [1] * 13 + [0] * (n - 13)})
+    sample = gsf.build_stratified_sample(df, sample_size=1000, seed=1)
+    assert len(sample) == 1000
+    assert sample["isFraud"].mean() == pytest.approx(df["isFraud"].mean(), abs=0.01)
+
+
+def test_build_stratified_sample_includes_at_least_one_fraud_row():
+    n = 10_000
+    df = pd.DataFrame({"step": np.arange(1, n + 1), "isFraud": [1] * 5 + [0] * (n - 5)})
+    sample = gsf.build_stratified_sample(df, sample_size=500, seed=1)
+    assert (sample["isFraud"] == 1).sum() >= 1

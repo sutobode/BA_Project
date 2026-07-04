@@ -113,3 +113,84 @@ FAILED_ATTEMPTS_FRAUD_LAMBDA = 0.6
 def generate_failed_payment_attempts_24h(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     lam = np.where(is_fraud == 1, FAILED_ATTEMPTS_FRAUD_LAMBDA, FAILED_ATTEMPTS_BASE_LAMBDA)
     return rng.poisson(lam).astype("int16")
+
+
+from pathlib import Path
+
+INPUT_CSV_PATH = "Data/PS_20174392719_1491204439457_log.csv"
+OUTPUT_PARQUET_PATH = "data/processed/transactions_synthetic.parquet"
+OUTPUT_SAMPLE_CSV_PATH = "data/processed/transactions_synthetic_sample.csv"
+SAMPLE_SIZE = 5000
+
+
+def generate_all_synthetic_fields(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    n = len(df)
+    is_fraud = df["isFraud"].to_numpy()
+    out = df.copy()
+
+    out["hour_of_day"] = generate_hour_of_day(df["step"])
+    out["is_night_transaction"] = generate_is_night_transaction(out["hour_of_day"])
+    out["customer_account_age_days"] = generate_account_age_days(is_fraud, rng)
+
+    device_pool = build_device_pool(size=DEVICE_POOL_SIZE, seed=seed)
+    out["device_id"] = generate_device_id(n, device_pool, rng)
+    out["browser"] = generate_categorical(n, BROWSER_WEIGHTS, rng)
+    out["device_type"] = generate_categorical(n, DEVICE_TYPE_WEIGHTS, rng)
+    out["new_device_flag"] = generate_new_device_flag(is_fraud, rng)
+
+    out["billing_country"] = generate_billing_country(n, rng)
+    out["ip_country"] = generate_ip_country(out["billing_country"].to_numpy(), is_fraud, rng)
+    out["ip_billing_distance_km"] = generate_ip_billing_distance_km(
+        out["ip_country"].to_numpy(), out["billing_country"].to_numpy()
+    )
+
+    out["shipping_billing_mismatch"] = generate_shipping_billing_mismatch(is_fraud, rng)
+    out["failed_payment_attempts_24h"] = generate_failed_payment_attempts_24h(is_fraud, rng)
+
+    return out
+
+
+def load_raw_transactions(csv_path: str = INPUT_CSV_PATH) -> pd.DataFrame:
+    dtype = {
+        "step": "int32",
+        "type": "category",
+        "amount": "float32",
+        "nameOrig": "string",
+        "oldbalanceOrg": "float32",
+        "newbalanceOrig": "float32",
+        "nameDest": "string",
+        "oldbalanceDest": "float32",
+        "newbalanceDest": "float32",
+        "isFraud": "int8",
+        "isFlaggedFraud": "int8",
+    }
+    return pd.read_csv(csv_path, dtype=dtype)
+
+
+def build_stratified_sample(df: pd.DataFrame, sample_size: int = SAMPLE_SIZE, seed: int = 42) -> pd.DataFrame:
+    fraud = df[df["isFraud"] == 1]
+    non_fraud = df[df["isFraud"] == 0]
+    fraud_frac = len(fraud) / len(df)
+    n_fraud_sample = min(len(fraud), max(1, round(sample_size * fraud_frac)))
+    n_non_fraud_sample = min(len(non_fraud), sample_size - n_fraud_sample)
+    sampled = pd.concat([
+        fraud.sample(n=n_fraud_sample, random_state=seed),
+        non_fraud.sample(n=n_non_fraud_sample, random_state=seed),
+    ])
+    return sampled.sample(frac=1, random_state=seed).reset_index(drop=True)
+
+
+def main():
+    df = load_raw_transactions()
+    result = generate_all_synthetic_fields(df, seed=42)
+    Path(OUTPUT_PARQUET_PATH).parent.mkdir(parents=True, exist_ok=True)
+    result.to_parquet(OUTPUT_PARQUET_PATH, index=False)
+    sample = build_stratified_sample(result, sample_size=SAMPLE_SIZE, seed=42)
+    sample.to_csv(OUTPUT_SAMPLE_CSV_PATH, index=False)
+    print(f"Wrote {len(result)} rows to {OUTPUT_PARQUET_PATH}")
+    print(f"Wrote {len(sample)} sample rows to {OUTPUT_SAMPLE_CSV_PATH}")
+
+
+if __name__ == "__main__":
+    main()
