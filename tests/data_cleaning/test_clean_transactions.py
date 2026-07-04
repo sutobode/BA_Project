@@ -73,3 +73,54 @@ def test_dedupe_exact_reports_zero_when_no_duplicates_exist():
     deduped, n_removed = ct.dedupe_exact(df)
     assert n_removed == 0
     assert len(deduped) == 3
+
+
+def _valid_category_row(**overrides):
+    row = {
+        "type": "PAYMENT",
+        "browser": "Chrome",
+        "device_type": "mobile",
+        "billing_country": "US",
+        "ip_country": "US",
+        "is_night_transaction": True,
+        "new_device_flag": False,
+        "shipping_billing_mismatch": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_check_invalid_categories_removes_unknown_transaction_type():
+    df = pd.DataFrame([
+        _valid_category_row(type="PAYMENT"),
+        _valid_category_row(type="BOGUS_TYPE"),
+        _valid_category_row(type="TRANSFER"),
+    ])
+    cleaned, counts, n_removed = ct.check_invalid_categories(df)
+    assert n_removed == 1
+    assert counts["type"] == 1
+    assert len(cleaned) == 2
+
+
+def test_check_invalid_categories_removes_unknown_country():
+    df = pd.DataFrame([
+        _valid_category_row(billing_country="US"),
+        _valid_category_row(billing_country="ZZ"),
+    ])
+    cleaned, counts, n_removed = ct.check_invalid_categories(df)
+    assert n_removed == 1
+    assert counts["billing_country"] == 1
+
+
+def test_check_invalid_categories_reports_zero_when_all_valid():
+    df = pd.DataFrame([
+        _valid_category_row(type="PAYMENT", browser="Chrome", device_type="mobile", billing_country="US", ip_country="US"),
+        _valid_category_row(type="TRANSFER", browser="Safari", device_type="desktop", billing_country="VN", ip_country="VN"),
+        _valid_category_row(type="CASH_OUT", browser="Edge", device_type="tablet", billing_country="GB", ip_country="GB"),
+        _valid_category_row(type="CASH_IN", browser="Firefox", device_type="mobile", billing_country="US", ip_country="US"),
+        _valid_category_row(type="DEBIT", browser="Other", device_type="desktop", billing_country="VN", ip_country="VN"),
+    ])
+    cleaned, counts, n_removed = ct.check_invalid_categories(df)
+    assert n_removed == 0
+    assert len(cleaned) == 5
+    assert all(v == 0 for v in counts.values())
