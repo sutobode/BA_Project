@@ -33,3 +33,18 @@ def generate_categorical(n: int, weights: dict, rng: np.random.Generator) -> np.
 
 def generate_device_id(n: int, device_pool: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return rng.choice(device_pool, size=n)
+
+
+def generate_conditional_bernoulli(
+    is_fraud: np.ndarray, base_p: float, fraud_p: float, rng: np.random.Generator
+) -> np.ndarray:
+    p = np.where(is_fraud == 1, fraud_p, base_p)
+    return rng.binomial(1, p).astype(bool)
+
+
+NEW_DEVICE_FLAG_BASE_P = 0.04
+NEW_DEVICE_FLAG_FRAUD_P = 0.12
+
+
+def generate_new_device_flag(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    return generate_conditional_bernoulli(is_fraud, NEW_DEVICE_FLAG_BASE_P, NEW_DEVICE_FLAG_FRAUD_P, rng)

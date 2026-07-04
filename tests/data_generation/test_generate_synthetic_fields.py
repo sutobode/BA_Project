@@ -72,3 +72,27 @@ def test_generate_categorical_only_returns_known_categories():
     rng = np.random.default_rng(0)
     result = gsf.generate_categorical(1000, gsf.BROWSER_WEIGHTS, rng)
     assert set(result).issubset(set(gsf.BROWSER_WEIGHTS.keys()))
+
+
+def test_generate_conditional_bernoulli_matches_base_and_fraud_rates():
+    rng = np.random.default_rng(0)
+    is_fraud = np.array([1] * 50_000 + [0] * 50_000)
+    result = gsf.generate_conditional_bernoulli(is_fraud, base_p=0.04, fraud_p=0.12, rng=rng)
+    fraud_rate = result[:50_000].mean()
+    base_rate = result[50_000:].mean()
+    assert fraud_rate == pytest.approx(0.12, abs=0.01)
+    assert base_rate == pytest.approx(0.04, abs=0.01)
+
+
+def test_generate_new_device_flag_base_rate_matches_spec():
+    rng = np.random.default_rng(1)
+    is_fraud = np.zeros(50_000, dtype=int)
+    result = gsf.generate_new_device_flag(is_fraud, rng)
+    assert result.mean() == pytest.approx(0.04, abs=0.01)
+
+
+def test_generate_new_device_flag_fraud_rate_matches_spec():
+    rng = np.random.default_rng(1)
+    is_fraud = np.ones(50_000, dtype=int)
+    result = gsf.generate_new_device_flag(is_fraud, rng)
+    assert result.mean() == pytest.approx(0.12, abs=0.01)
