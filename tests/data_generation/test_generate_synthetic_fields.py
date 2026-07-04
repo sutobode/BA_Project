@@ -109,7 +109,7 @@ def test_generate_account_age_days_fraud_median_lower_than_base():
     rng = np.random.default_rng(0)
     is_fraud = np.ones(100_000, dtype=int)
     result = gsf.generate_account_age_days(is_fraud, rng)
-    assert np.median(result) == pytest.approx(150, rel=0.15)
+    assert np.median(result) == pytest.approx(275, rel=0.15)
 
 
 def test_generate_account_age_days_respects_bounds():

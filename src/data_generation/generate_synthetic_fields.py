@@ -51,7 +51,7 @@ def generate_new_device_flag(is_fraud: np.ndarray, rng: np.random.Generator) -> 
 
 
 ACCOUNT_AGE_BASE_MEDIAN_DAYS = 400
-ACCOUNT_AGE_FRAUD_MEDIAN_DAYS = 150
+ACCOUNT_AGE_FRAUD_MEDIAN_DAYS = 275
 ACCOUNT_AGE_SIGMA = 0.6
 ACCOUNT_AGE_MIN_DAYS = 1
 ACCOUNT_AGE_MAX_DAYS = 3650

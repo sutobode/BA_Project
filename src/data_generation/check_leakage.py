@@ -54,7 +54,7 @@ FIELD_METADATA: list[dict] = [
     {
         "field_name": "customer_account_age_days", "data_type": "int32", "unit": "days",
         "valid_range": "[1, 3650]", "generation_type": "conditional-on-fraud",
-        "logic_or_formula": "lognormal(median=400 base / 150 fraud, sigma=0.6), clipped",
+        "logic_or_formula": "lognormal(median=400 base / 275 fraud, sigma=0.6), clipped",
         "business_assumption": "Compromised/mule accounts assumed more often recently created (business assumption, not empirically derived).",
         "metric_type": "auc",
     },
