@@ -83,7 +83,37 @@ Mỗi field ghi đủ các cột sau (Markdown hoặc Excel):
 - Do PaySim chỉ gắn fraud cho `TRANSFER`/`CASH_OUT`, các field như `shipping_billing_mismatch` mang tính diễn giải lại (account-takeover thay vì checkout fraud thật) — cần nêu rõ giới hạn này trong phần "limitations" của report cuối (Module 8).
 - 9.313 `nameOrig` có lặp lại (0,15%) bị xử lý như các dòng độc lập (không có xử lý đặc biệt) — chấp nhận được vì tỷ lệ quá nhỏ để ảnh hưởng kết quả.
 
-## 9. Bàn giao cho vai trò khác
+## 9. Đối chiếu với yêu cầu đề bài (Compliance Checklist)
+
+Đối chiếu trực tiếp từng câu chữ liên quan trong `yeucau.txt` để đảm bảo thiết kế đáp ứng **tối thiểu** yêu cầu của giảng viên trước khi cho phép code:
+
+| Yêu cầu trong `yeucau.txt` | Đáp ứng trong thiết kế này | Trạng thái |
+|---|---|---|
+| "generate additional contextual data using Python (e.g., the Faker library plus custom business logic)" (dòng 36-37) | Faker dùng để tạo pool 50.000 device ID; các field còn lại dùng numpy + business logic tự viết (mục 4, 6) | ✅ |
+| "customer account age" (dòng 37) | `customer_account_age_days` (mục 4, #3) | ✅ |
+| "device/browser fingerprint" (dòng 38) | `device_id`, `browser`, `device_type`, `new_device_flag` (mục 4, #4-7) | ✅ |
+| "shipping vs. billing address mismatch" (dòng 41) | `shipping_billing_mismatch` (mục 4, #11) — có ghi chú diễn giải lại do đặc thù PaySim (mục 8) | ✅ |
+| "number of failed payment attempts" (dòng 42) | `failed_payment_attempts_24h` (mục 4, #12) | ✅ |
+| "IP-to-billing-country distance" (dòng 42) | `ip_country`, `billing_country`, `ip_billing_distance_km` — khoảng cách số (km), không phải flag nhị phân (mục 4, #8-10) | ✅ |
+| "time-of-day pattern" (dòng 42) | `hour_of_day`, `is_night_transaction` (mục 4, #1-2) | ✅ |
+| "teams must justify the realism of the data they generate and document it rigorously" (dòng 44) | Cột "Lập luận chọn số" trong bảng field (mục 4) + mục 8 nêu rõ giới hạn/giả định, không che giấu | ✅ |
+| "must explicitly address the class-imbalance challenge inherent to fraud data" (dòng 45) | Giữ nguyên tỷ lệ fraud gốc 0,1291% khi sinh field (không oversample/undersample ở bước này) — kỹ thuật xử lý imbalance (SMOTE/class weight) thuộc phạm vi Module 4, nêu rõ để không nhầm phạm vi trách nhiệm | ✅ (trong phạm vi Module 1) |
+| "Data Dictionary Requirement: ... column name, data type, unit, valid range, and the generation logic or business assumption used" (dòng 46-48) | Mục 7 có đủ 5 cột tối thiểu + thêm cột đo AUC (vượt tối thiểu) | ✅ |
+| Module 1 — "Produce a complete data dictionary" | Mục 7 + deliverable cụ thể ở mục 10 | ✅ |
+| Deliverable: "Data dictionary — Excel or Markdown file" (dòng 116) | Chốt cụ thể: `docs/DATA_DICTIONARY.md` (mục 10) | ✅ |
+| "Originality of code — all code must be authored by team members" (dòng 155) | Toàn bộ logic tự viết (numpy/pandas/Faker), không dùng AutoML/no-code | ✅ |
+
+**Kết luận:** thiết kế hiện tại đáp ứng đủ tất cả các điểm bắt buộc liên quan đến synthetic data ở Module 1. Không có điểm nào bị thiếu ở mức tối thiểu; phần "etc." (mở rộng thêm field ngoài 5 field nêu tên) là tùy chọn, không bắt buộc để đạt điểm tối thiểu.
+
+## 10. Deliverables cụ thể (đường dẫn file)
+
+- Code sinh dữ liệu: `src/data_generation/generate_synthetic_fields.py`
+- Bảng tra tọa độ quốc gia (dùng cho `ip_billing_distance_km`): `src/data_generation/country_centroids.py`
+- Script đo leakage (mục 5): `src/data_generation/check_leakage.py`
+- Output dữ liệu: `data/processed/transactions_synthetic.parquet` + `data/processed/transactions_synthetic_sample.csv` (~5.000 dòng stratified)
+- Data dictionary: `docs/DATA_DICTIONARY.md` (theo cấu trúc mục 7, sinh tự động từ script hoặc điền tay sau khi chạy `check_leakage.py`)
+
+## 11. Bàn giao cho vai trò khác
 
 - **Người 4 (Feature Engineer):** các field string (`device_id`, `billing_country`, `ip_country`, `browser`, `device_type`) cần encode; `ip_billing_distance_km` và `failed_payment_attempts_24h` đã là numeric, dùng trực tiếp được.
 - **Người 5 (ML Engineer):** cảnh báo các feature balance hiện có (`sender_balance_delta`...) đang cho AUC-PR 0.9988 — nghi ngờ leakage sẵn có trong PaySim (fraud thường rút sạch số dư). Nên train model có/không các feature đó để so sánh, tránh đánh giá sai giá trị của field synthetic mới.
