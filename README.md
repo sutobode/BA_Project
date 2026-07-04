@@ -155,7 +155,7 @@ sequenceDiagram
     Check->>Dev: device_id: 0.0879 -> 0.0, vẫn 12/12 PASS, ổn định hơn theo sample size
 ```
 
-**Bài học rút ra:** nếu `check_leakage` báo FAIL, đó là quy trình đang hoạt động đúng — không phải bug (xem mục 17 để biết cách xử lý). Cramér's V dùng công thức **hiệu chỉnh bias** (không phải công thức chuẩn sách giáo khoa) vì field cardinality lớn (`device_id`, 50.000 giá trị) bị lệch dương với công thức gốc, đặc biệt nhạy với **kích thước dataset**.
+**Bài học rút ra:** nếu `check_leakage` báo FAIL, đó là quy trình đang hoạt động đúng — không phải bug (xem mục 18 để biết cách xử lý). Cramér's V dùng công thức **hiệu chỉnh bias** (không phải công thức chuẩn sách giáo khoa) vì field cardinality lớn (`device_id`, 50.000 giá trị) bị lệch dương với công thức gốc, đặc biệt nhạy với **kích thước dataset**.
 
 ## 9. Kết quả đo được trên dữ liệu thật (Phần A)
 
@@ -273,7 +273,52 @@ Báo cáo đầy đủ (tự sinh từ code): [`docs/CLEANING_REPORT.md`](docs/C
 
 # TỔNG HỢP
 
-## 16. Cấu trúc code & test
+## 16. Mô tả đầy đủ 26 trường dữ liệu (Full Field Reference — `transactions_cleaned`)
+
+Bảng tham chiếu đầy đủ cho **dataset cuối cùng** (`transactions_cleaned.parquet`/`.csv`, 6.362.620 dòng × 26 cột) — dùng để viết tài liệu/data dictionary chính thức. Dtype lấy trực tiếp từ file thật.
+
+### A. 11 trường gốc từ PaySim
+
+| Cột | Kiểu dữ liệu | Đơn vị / Range | Ý nghĩa |
+|---|---|---|---|
+| `step` | int32 | Giờ mô phỏng, 1–743 (~31 ngày) | Thời điểm giao dịch, tính bằng số giờ kể từ lúc mô phỏng bắt đầu. `hour_of_day`/`is_night_transaction` (synthetic) suy ra từ cột này |
+| `type` | category | {CASH_IN, CASH_OUT, DEBIT, PAYMENT, TRANSFER} | Loại giao dịch. **Fraud chỉ xảy ra ở `TRANSFER` và `CASH_OUT`** (đặc điểm PaySim — xem mục 3) |
+| `amount` | float32 | ≥ 0, thực tế đến ~92,4 triệu | Số tiền giao dịch (đơn vị tiền tệ mô phỏng). Phân phối lệch phải mạnh — xem `is_amount_outlier` |
+| `nameOrig` | string | Bắt đầu bằng `C` + số | Mã định danh tài khoản khởi tạo giao dịch. 99,85% chỉ xuất hiện đúng 1 lần trong dataset (xem mục 3) |
+| `oldbalanceOrg` | float32 | ≥ 0 | Số dư tài khoản nguồn **trước** giao dịch |
+| `newbalanceOrig` | float32 | ≥ 0 | Số dư tài khoản nguồn **sau** giao dịch. So với `oldbalanceOrg - amount` để phát hiện `is_balance_inconsistent` |
+| `nameDest` | string | Bắt đầu bằng `C` (khách hàng) hoặc `M` (merchant) | Mã định danh tài khoản/đối tượng nhận giao dịch |
+| `oldbalanceDest` | float32 | ≥ 0, thực tế đến ~356 triệu | Số dư tài khoản đích **trước** giao dịch. Thường = 0 với merchant (không track) — nguồn gốc của tỷ lệ 80,45% "balance inconsistent" |
+| `newbalanceDest` | float32 | ≥ 0 | Số dư tài khoản đích **sau** giao dịch |
+| `isFraud` | int8 | {0, 1} | **Nhãn gian lận thật** (biến mục tiêu) — mô phỏng hành vi account-takeover (chiếm quyền tài khoản rồi rút/chuyển tiền) |
+| `isFlaggedFraud` | int8 | {0, 1} (chỉ 16/6.362.620 dòng = 1) | Cờ cảnh báo **tự động, có sẵn trong PaySim** theo 1 rule đơn giản (transfer giá trị lớn) — **không phải nhãn thật**, không nên nhầm với `isFraud` hay với các cột flag cleaning |
+
+### B. 12 trường synthetic (sinh ở Phần A — chi tiết công thức xem mục 7)
+
+| Cột | Kiểu dữ liệu | Đơn vị / Range | Ý nghĩa |
+|---|---|---|---|
+| `hour_of_day` | int16 | [0, 23] | Giờ trong ngày, suy trực tiếp từ `step` |
+| `is_night_transaction` | bool | {True, False} | Giao dịch diễn ra trong khung giờ đêm (0h–6h) |
+| `customer_account_age_days` | int32 | [1, 3650] | Tuổi tài khoản khách hàng (ngày) tính đến thời điểm giao dịch — tài khoản mới có xu hướng gắn với fraud (account-takeover) |
+| `device_id` | string | UUID, pool 50.000 giá trị | Mã định danh thiết bị dùng để thực hiện giao dịch |
+| `browser` | string | {Chrome, Safari, Edge, Firefox, Other} | Trình duyệt dùng để thực hiện giao dịch |
+| `device_type` | string | {mobile, desktop, tablet} | Loại thiết bị |
+| `new_device_flag` | bool | {True, False} | Giao dịch có đến từ thiết bị chưa từng ghi nhận với tài khoản này hay không |
+| `billing_country` | string | Mã ISO, 20 quốc gia cố định | Quốc gia đăng ký/billing của khách hàng |
+| `ip_country` | string | Mã ISO, 20 quốc gia cố định | Quốc gia suy ra từ địa chỉ IP thực hiện giao dịch |
+| `ip_billing_distance_km` | float64 | [0, ~17.881] | Khoảng cách địa lý (km) giữa `ip_country` và `billing_country`, tính bằng haversine — 0 nếu hai quốc gia trùng nhau |
+| `shipping_billing_mismatch` | bool | {True, False} | Địa chỉ giao dịch/nhận hàng có khác địa chỉ đăng ký hay không |
+| `failed_payment_attempts_24h` | int16 | [0, ~5] | Số lần thanh toán thất bại trong 24 giờ trước giao dịch này |
+
+### C. 3 trường flag từ Phần B — Data Cleaning (ý nghĩa chi tiết xem mục 14)
+
+| Cột | Kiểu dữ liệu | Đơn vị / Range | Ý nghĩa |
+|---|---|---|---|
+| `is_amount_outlier` | bool | {True, False} (338.078 dòng = True) | `amount` nằm ngoài khoảng Tukey IQR bình thường — giá trị bất thường lớn, có thể là tín hiệu fraud, không phải nhiễu cần loại bỏ |
+| `is_zero_amount` | bool | {True, False} (16 dòng = True) | `amount = 0` — toàn bộ 16 dòng quan sát được đều là fraud thật, tín hiệu hiếm nhưng rất mạnh |
+| `is_balance_inconsistent` | bool | {True, False} (5.118.892 dòng = True) | `oldbalanceOrg - amount ≠ newbalanceOrig` — **đặc điểm cố hữu của PaySim, không phải lỗi dữ liệu**; tỷ lệ cao (80,45%) là bình thường, không nên báo cáo như vấn đề chất lượng dữ liệu |
+
+## 17. Cấu trúc code & test
 
 ```
 src/data_generation/
@@ -298,7 +343,7 @@ tests/data_cleaning/            # 18 unit test
 | `transactions_cleaned.parquet` / `.csv` | Sau Phần B — **bản cuối cùng** | 6.362.620 | 26 |
 | `transactions_cleaned_sample.csv` | Sau Phần B (mẫu) | ~5.000 | 26 |
 
-## 17. Cách chạy end-to-end
+## 18. Cách chạy end-to-end
 
 Yêu cầu: Python 3.13 (ví dụ `C:\ProgramData\miniconda3\python.exe`), chạy trong git-bash/MSYS.
 
@@ -333,7 +378,7 @@ PYTHONPATH=src .venv/Scripts/python.exe -m data_cleaning.cleaning_report
 
 **Nếu bước 3 báo FAIL cho field nào:** mở `generate_synthetic_fields.py`, tìm hằng số điều khiển hệ số fraud của field đó (ví dụ `NEW_DEVICE_FLAG_FRAUD_P`), giảm nó về gần baseline hơn (nguyên tắc #3 ở mục 4), chạy lại bước 2 rồi bước 3 đến khi tất cả PASS.
 
-## 18. Giới hạn & rủi ro đã biết
+## 19. Giới hạn & rủi ro đã biết
 
 **Phần A (synthetic):**
 - Các hệ số odds-ratio/λ là giả định nghiệp vụ tự đặt, không suy từ số liệu fraud thực tế công khai nào.
@@ -346,7 +391,7 @@ PYTHONPATH=src .venv/Scripts/python.exe -m data_cleaning.cleaning_report
 - Outlier/inconsistency chỉ được **flag**, không loại khỏi dataset — quyết định có dùng làm feature hay không thuộc về bước sau.
 - Check invalid category cho cột synthetic dựa trên danh sách giá trị đã dùng để sinh ở Phần A — nếu sinh lại dữ liệu với danh sách khác, cần đồng bộ lại.
 
-## 19. Dùng output cho bước tiếp theo
+## 20. Dùng output cho bước tiếp theo
 
 - Dùng `transactions_cleaned.parquet`/`.csv` (26 cột) làm input cho feature engineering — đây là bản đầy đủ nhất, đã qua cả 2 giai đoạn.
 - Các field string (`device_id`, `billing_country`, `ip_country`, `browser`, `device_type`) cần encode; `ip_billing_distance_km`, `failed_payment_attempts_24h` đã là numeric, dùng trực tiếp được.
