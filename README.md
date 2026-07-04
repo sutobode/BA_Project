@@ -60,17 +60,19 @@ Chạy trên toàn bộ 6.362.620 dòng: row count và tỷ lệ fraud giữ ngu
 
 Lượt kiểm tra leakage đầu tiên phát hiện `customer_account_age_days` **vượt ngưỡng thật** (AUC 0,8753). Đã giảm hệ số fraud (median 150 → 275 ngày) theo đúng quy trình ở mục "cơ chế chống leakage", sinh lại và đạt AUC 0,6689. Sau điều chỉnh, **12/12 field PASS**:
 
+Một review độc lập sau đó phát hiện công thức Cramér's V gốc (chưa hiệu chỉnh) bị lệch dương (biased) với field có cardinality lớn như `device_id` (50.000 giá trị) — trên mẫu nhỏ hơn có thể báo FAIL giả (~0.48, gần sát ngưỡng 0.5) dù field này độc lập hoàn toàn với fraud theo thiết kế. Đã thay bằng **Cramér's V hiệu chỉnh bias (Bergsma-Wicher)**, giá trị `device_id` giảm từ 0,0879 xuống 0,0 — số liệu dưới đây đã cập nhật theo công thức mới:
+
 | Field | Metric | Giá trị |
 |---|---|---|
 | `hour_of_day` | AUC | 0.6336 |
 | `is_night_transaction` | AUC | 0.6217 |
 | `customer_account_age_days` | AUC | 0.6689 |
-| `device_id` | Cramér's V | 0.0879 |
-| `browser` | Cramér's V | 0.0007 |
-| `device_type` | Cramér's V | 0.0007 |
+| `device_id` | Cramér's V | 0.0 |
+| `browser` | Cramér's V | 0.0 |
+| `device_type` | Cramér's V | 0.0004 |
 | `new_device_flag` | AUC | 0.5419 |
-| `billing_country` | Cramér's V | 0.0017 |
-| `ip_country` | Cramér's V | 0.0052 |
+| `billing_country` | Cramér's V | 0.0 |
+| `ip_country` | Cramér's V | 0.0049 |
 | `ip_billing_distance_km` | AUC | 0.5651 |
 | `shipping_billing_mismatch` | AUC | 0.5495 |
 | `failed_payment_attempts_24h` | AUC | 0.6589 |
