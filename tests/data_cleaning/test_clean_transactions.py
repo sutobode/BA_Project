@@ -44,3 +44,32 @@ def test_check_missing_critical_reports_zero_when_no_missing_values():
     assert n_removed == 0
     assert all(v == 0 for v in na_counts.values())
     assert len(cleaned) == 2
+
+
+def test_dedupe_exact_removes_full_row_duplicates():
+    df = pd.DataFrame({
+        "step": [1, 1, 2],
+        "type": ["PAYMENT", "PAYMENT", "TRANSFER"],
+        "amount": [10.0, 10.0, 20.0],
+    })
+    deduped, n_removed = ct.dedupe_exact(df)
+    assert n_removed == 1
+    assert len(deduped) == 2
+
+
+def test_dedupe_exact_keeps_rows_that_differ_in_any_column():
+    df = pd.DataFrame({
+        "step": [1, 1],
+        "type": ["PAYMENT", "PAYMENT"],
+        "amount": [10.0, 10.1],
+    })
+    deduped, n_removed = ct.dedupe_exact(df)
+    assert n_removed == 0
+    assert len(deduped) == 2
+
+
+def test_dedupe_exact_reports_zero_when_no_duplicates_exist():
+    df = pd.DataFrame({"step": [1, 2, 3], "amount": [10.0, 20.0, 30.0]})
+    deduped, n_removed = ct.dedupe_exact(df)
+    assert n_removed == 0
+    assert len(deduped) == 3
