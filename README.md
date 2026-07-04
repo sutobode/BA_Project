@@ -1,6 +1,6 @@
 # Synthetic Contextual Data — Chiến lược, Logic & Cách chạy
 
-Module này sinh thêm các trường bối cảnh e-commerce/hành vi (device, IP, thời gian, tài khoản, thanh toán thất bại...) cho dataset PaySim gốc, phục vụ Module 1 (Business Understanding & Data Generation) của đề bài Real-Time Payment Fraud Detection — phần việc của **Người 2 (Data Engineer)**.
+Module này sinh thêm các trường bối cảnh e-commerce/hành vi (device, IP, thời gian, tài khoản, thanh toán thất bại...) cho dataset PaySim gốc, phục vụ bài toán phát hiện gian lận thanh toán (fraud detection) theo thời gian thực.
 
 Tài liệu này là **nguồn tham khảo đầy đủ, tự chứa** (đọc xong hiểu được toàn bộ logic/chiến lược/quy tắc, không cần mở file khác). Tài liệu gốc chi tiết hơn nếu cần tra cứu sâu:
 - Spec (thiết kế + lý do từng quyết định): [`docs/superpowers/specs/2026-07-03-synthetic-data-nguoi2-design.md`](docs/superpowers/specs/2026-07-03-synthetic-data-nguoi2-design.md)
@@ -11,7 +11,7 @@ Tài liệu này là **nguồn tham khảo đầy đủ, tự chứa** (đọc x
 
 ## 1. Tổng quan
 
-**Bài toán:** Kaggle PaySim chỉ có dữ liệu giao dịch tài chính thô (số tiền, số dư, loại giao dịch...), không có các trường "bối cảnh e-commerce" mà đề bài yêu cầu (device fingerprint, khoảng cách IP-billing, tuổi tài khoản, mismatch địa chỉ, số lần thanh toán thất bại, pattern theo giờ). Module này sinh thêm 12 trường đó bằng Python (Faker + business logic tự viết), đồng thời **tự kiểm tra khách quan** để đảm bảo dữ liệu sinh ra thực tế nhưng không "lộ" nhãn fraud một cách giả tạo (data leakage).
+**Bài toán:** Kaggle PaySim chỉ có dữ liệu giao dịch tài chính thô (số tiền, số dư, loại giao dịch...), không có các trường "bối cảnh e-commerce" cần thiết để mô hình fraud detection có đủ tín hiệu hành vi (device fingerprint, khoảng cách IP-billing, tuổi tài khoản, mismatch địa chỉ, số lần thanh toán thất bại, pattern theo giờ). Module này sinh thêm 12 trường đó bằng Python (Faker + business logic tự viết), đồng thời **tự kiểm tra khách quan** để đảm bảo dữ liệu sinh ra thực tế nhưng không "lộ" nhãn fraud một cách giả tạo (data leakage).
 
 **Nguồn dữ liệu:** `Data/PS_20174392719_1491204439457_log.csv` — PaySim / Online Payments Fraud Dataset, **6.362.620 dòng, dùng toàn bộ** (không lấy mẫu). Cột gốc: `step, type, amount, nameOrig, oldbalanceOrg, newbalanceOrig, nameDest, oldbalanceDest, newbalanceDest, isFraud, isFlaggedFraud`.
 
@@ -56,9 +56,9 @@ Chi tiết sự thật 2 — số fraud theo loại giao dịch (khớp đúng t
 |---|---|---|
 | 1 | Sinh **row-level**, không customer profile | Sự thật 1 — không có lịch sử khách hàng đáng kể để dùng lại |
 | 2 | Chỉ tiêm tín hiệu fraud vào field **có lý do hành vi thật** (new device, IP lệch, giờ đêm, tài khoản mới, mismatch địa chỉ, thất bại thanh toán). Field không có cơ sở hành vi (`browser`, `device_type`, `device_id`, `billing_country`) sinh **độc lập** với `isFraud` | Dữ liệu gian lận thật không bao giờ có *mọi* field tương quan với nhãn — nếu ép hết thì chính là dấu hiệu leakage giả tạo |
-| 3 | Mọi hệ số (odds-ratio, Poisson λ, median gap) **giới hạn 2–4 lần baseline** | Đề bài yêu cầu "justify the realism" — số phải giải trình được, không phải chọn để đạt AUC cao. Fraud giỏi vẫn giả mạo được hành vi bình thường, nên tín hiệu không bao giờ tuyệt đối |
+| 3 | Mọi hệ số (odds-ratio, Poisson λ, median gap) **giới hạn 2–4 lần baseline** | Mỗi con số phải giải trình được (justify the realism), không phải chọn để đạt AUC cao. Fraud giỏi vẫn giả mạo được hành vi bình thường, nên tín hiệu không bao giờ tuyệt đối |
 | 4 | Field tính được trực tiếp từ dữ liệu gốc (`step`) thì **suy bằng công thức**, không random | Không có lý do "đoán" khi dữ liệu gốc đã cho biết chính xác |
-| 5 | Đo leakage **khách quan bằng số** sau khi sinh, không chỉ "cảm thấy hợp lý" | AUC/Cramér's V là con số lặp lại được, là bằng chứng "rigor" khi chấm điểm |
+| 5 | Đo leakage **khách quan bằng số** sau khi sinh, không chỉ "cảm thấy hợp lý" | AUC/Cramér's V là con số lặp lại được, là bằng chứng khách quan cho tính rigor của quy trình |
 
 ---
 
@@ -163,7 +163,7 @@ sequenceDiagram
 
 ## 8. Kết quả đo được trên dữ liệu thật (6.362.620 dòng)
 
-Row count và tỷ lệ fraud giữ nguyên (0,1291%) so với file gốc — bước sinh dữ liệu **không làm thay đổi class imbalance** (xử lý imbalance kỹ thuật là việc của Module 4, ngoài phạm vi module này).
+Row count và tỷ lệ fraud giữ nguyên (0,1291%) so với file gốc — bước sinh dữ liệu **không làm thay đổi class imbalance**. Xử lý imbalance kỹ thuật (SMOTE, class weight...) không thuộc phạm vi module này, để lại cho bước feature engineering/modeling phía sau.
 
 | Field | Metric | Giá trị đo được | Kết quả |
 |---|---|---|---|
@@ -231,7 +231,7 @@ PYTHONPATH=src .venv/Scripts/python.exe -m data_generation.check_leakage
 - 9.313 `nameOrig` có lặp lại (0,15%) được xử lý như dòng độc lập, không có logic đặc biệt.
 - Cột `amount`/số dư gốc lưu ở `float32` (tối ưu bộ nhớ cho 6,3 triệu dòng) — có thể mất độ chính xác nhỏ ở các giá trị số dư lớn; không ảnh hưởng 12 field synthetic (chúng không dùng các cột này).
 
-## 12. Bàn giao cho các vai trò khác
+## 12. Dùng output cho bước tiếp theo
 
-- **Feature Engineer:** field string (`device_id`, `billing_country`, `ip_country`, `browser`, `device_type`) cần encode; `ip_billing_distance_km`, `failed_payment_attempts_24h` đã là numeric, dùng trực tiếp được.
-- **ML Engineer:** feature balance hiện có (`sender_balance_delta`...) cho AUC-PR rất cao (~0.9988) — khả năng leak sẵn có trong PaySim (fraud thường rút sạch số dư). Nên train có/không các feature đó để so sánh, tránh đánh giá sai giá trị của field synthetic mới.
+- Các field string (`device_id`, `billing_country`, `ip_country`, `browser`, `device_type`) cần encode trước khi đưa vào model; `ip_billing_distance_km`, `failed_payment_attempts_24h` đã là numeric, dùng trực tiếp được.
+- Nếu dataset đầu vào có sẵn các feature dạng balance-delta (số dư trước/sau giao dịch), cần lưu ý: PaySim fraud thường rút sạch số dư nên các feature đó có thể cho AUC-PR rất cao một cách đáng ngờ (leakage sẵn có trong chính dữ liệu gốc, không liên quan đến 12 field synthetic ở đây). Nên train mô hình có/không các feature đó để so sánh, tránh đánh giá sai giá trị thực của field synthetic mới.
