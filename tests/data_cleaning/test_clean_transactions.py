@@ -124,3 +124,16 @@ def test_check_invalid_categories_reports_zero_when_all_valid():
     assert n_removed == 0
     assert len(cleaned) == 5
     assert all(v == 0 for v in counts.values())
+
+
+def test_flag_amount_outliers_flags_values_beyond_tukey_fence():
+    amounts = pd.Series([10.0, 12.0, 11.0, 13.0, 10.0, 12.0, 5000.0])
+    result = ct.flag_amount_outliers(amounts)
+    assert result.iloc[-1] == True
+    assert not result.iloc[:-1].any()
+
+
+def test_flag_amount_outliers_flags_nothing_for_tight_distribution():
+    amounts = pd.Series([10.0, 11.0, 12.0, 10.5, 11.5, 10.2, 11.8])
+    result = ct.flag_amount_outliers(amounts)
+    assert not result.any()

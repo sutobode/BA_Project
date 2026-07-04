@@ -52,3 +52,14 @@ def check_invalid_categories(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, int]
     n_removed = int(invalid_mask.sum())
     cleaned = df[~invalid_mask].reset_index(drop=True)
     return cleaned, per_check_invalid_counts, n_removed
+
+
+def flag_amount_outliers(amount: pd.Series) -> pd.Series:
+    """Tukey IQR fence: values outside [Q1 - 1.5*IQR, Q3 + 1.5*IQR] are flagged.
+    Flagged, not removed - a large transaction amount can itself be a fraud signal.
+    """
+    q1, q3 = amount.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+    return (amount < lower) | (amount > upper)
