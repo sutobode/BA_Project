@@ -118,3 +118,54 @@ def test_generate_account_age_days_respects_bounds():
     result = gsf.generate_account_age_days(is_fraud, rng)
     assert result.min() >= 1
     assert result.max() <= 3650
+
+
+def test_generate_billing_country_only_returns_known_countries():
+    from data_generation.country_centroids import COUNTRY_LIST
+    rng = np.random.default_rng(0)
+    result = gsf.generate_billing_country(5000, rng)
+    assert set(result).issubset(set(COUNTRY_LIST))
+
+
+def test_generate_ip_country_match_rate_matches_base_probability():
+    rng = np.random.default_rng(0)
+    n = 100_000
+    billing = gsf.generate_billing_country(n, rng)
+    is_fraud = np.zeros(n, dtype=int)
+    ip = gsf.generate_ip_country(billing, is_fraud, rng)
+    match_rate = (ip == billing).mean()
+    assert match_rate == pytest.approx(0.93, abs=0.01)
+
+
+def test_generate_ip_country_fraud_rows_have_lower_match_rate():
+    rng = np.random.default_rng(0)
+    n = 100_000
+    billing = gsf.generate_billing_country(n, rng)
+    is_fraud = np.ones(n, dtype=int)
+    ip = gsf.generate_ip_country(billing, is_fraud, rng)
+    match_rate = (ip == billing).mean()
+    assert match_rate == pytest.approx(0.80, abs=0.01)
+
+
+def test_generate_ip_country_returns_only_known_countries():
+    from data_generation.country_centroids import COUNTRY_LIST
+    rng = np.random.default_rng(0)
+    n = 5000
+    billing = gsf.generate_billing_country(n, rng)
+    is_fraud = rng.integers(0, 2, size=n)
+    ip = gsf.generate_ip_country(billing, is_fraud, rng)
+    assert set(ip).issubset(set(COUNTRY_LIST))
+
+
+def test_generate_ip_billing_distance_km_zero_when_countries_match():
+    ip = np.array(["US", "VN"])
+    billing = np.array(["US", "VN"])
+    result = gsf.generate_ip_billing_distance_km(ip, billing)
+    assert np.allclose(result, 0.0)
+
+
+def test_generate_ip_billing_distance_km_positive_when_countries_differ():
+    ip = np.array(["US"])
+    billing = np.array(["VN"])
+    result = gsf.generate_ip_billing_distance_km(ip, billing)
+    assert result[0] > 10000

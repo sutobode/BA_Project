@@ -63,3 +63,36 @@ def generate_account_age_days(is_fraud: np.ndarray, rng: np.random.Generator) ->
     raw = rng.lognormal(mean=mu, sigma=ACCOUNT_AGE_SIGMA)
     clipped = np.clip(raw, ACCOUNT_AGE_MIN_DAYS, ACCOUNT_AGE_MAX_DAYS)
     return clipped.round().astype("int32")
+
+
+from data_generation.country_centroids import (
+    COUNTRY_WEIGHTS,
+    COUNTRY_LIST,
+    COUNTRY_INDEX,
+    N_COUNTRIES,
+    distance_between_countries,
+)
+
+IP_COUNTRY_MATCH_BASE_P = 0.93
+IP_COUNTRY_MATCH_FRAUD_P = 0.80
+
+
+def generate_billing_country(n: int, rng: np.random.Generator) -> np.ndarray:
+    return generate_categorical(n, COUNTRY_WEIGHTS, rng)
+
+
+def generate_ip_country(billing_country: np.ndarray, is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    n = len(billing_country)
+    match_p = np.where(is_fraud == 1, IP_COUNTRY_MATCH_FRAUD_P, IP_COUNTRY_MATCH_BASE_P)
+    matches = rng.binomial(1, match_p).astype(bool)
+    billing_idx = pd.Series(billing_country).map(COUNTRY_INDEX).to_numpy()
+    # Offset by 1..N-1 guarantees a genuinely different country when not matching -
+    # no accidental same-country coincidence, keeping the mismatch rate exact.
+    offset = rng.integers(1, N_COUNTRIES, size=n)
+    mismatch_idx = (billing_idx + offset) % N_COUNTRIES
+    mismatch_country = np.array(COUNTRY_LIST)[mismatch_idx]
+    return np.where(matches, billing_country, mismatch_country)
+
+
+def generate_ip_billing_distance_km(ip_country: np.ndarray, billing_country: np.ndarray) -> np.ndarray:
+    return distance_between_countries(ip_country, billing_country)
