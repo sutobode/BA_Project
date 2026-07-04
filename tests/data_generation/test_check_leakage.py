@@ -35,3 +35,42 @@ def test_cramers_v_independent_association_is_near_zero():
     feature = pd.Series(rng.choice(["A", "B", "C"], size=10_000))
     label = pd.Series(rng.integers(0, 2, size=10_000))
     assert cl.cramers_v(feature, label) < 0.05
+
+
+def test_check_all_fields_flags_perfectly_separating_numeric_fields():
+    n = 1000
+    label = pd.Series([0] * 500 + [1] * 500)
+    df = pd.DataFrame({"isFraud": label})
+    for meta in cl.FIELD_METADATA:
+        if meta["metric_type"] == "auc":
+            df[meta["field_name"]] = [0] * 500 + [1] * 500
+        else:
+            df[meta["field_name"]] = ["X"] * 1000
+    report = cl.check_all_fields(df)
+    auc_rows = report[report["metric_type"] == "auc"]
+    assert (auc_rows["status"] == "FAIL").all()
+
+
+def test_check_all_fields_passes_fields_with_no_association():
+    n = 1000
+    rng = np.random.default_rng(0)
+    label = pd.Series(rng.integers(0, 2, size=n))
+    df = pd.DataFrame({"isFraud": label})
+    for meta in cl.FIELD_METADATA:
+        if meta["metric_type"] == "auc":
+            df[meta["field_name"]] = rng.random(n)
+        else:
+            df[meta["field_name"]] = rng.choice(["A", "B", "C"], size=n)
+    report = cl.check_all_fields(df)
+    assert (report["status"] == "PASS").all()
+
+
+def test_build_data_dictionary_markdown_contains_all_fields():
+    report = pd.DataFrame([
+        {"field_name": m["field_name"], "metric_type": m["metric_type"], "metric_value": 0.1, "status": "PASS"}
+        for m in cl.FIELD_METADATA
+    ])
+    markdown = cl.build_data_dictionary_markdown(report)
+    for meta in cl.FIELD_METADATA:
+        assert f"`{meta['field_name']}`" in markdown
+    assert markdown.startswith("# Data Dictionary")
