@@ -78,3 +78,56 @@ def flag_balance_inconsistency(
     This is a known PaySim data characteristic (destination/merchant balances
     often untracked), not a data-entry error - flagged, not removed."""
     return (old_balance_org - amount - new_balance_orig).abs() > tolerance
+
+
+from pathlib import Path
+from data_generation.generate_synthetic_fields import build_stratified_sample
+
+INPUT_PARQUET_PATH = "data/processed/transactions_synthetic.parquet"
+OUTPUT_PARQUET_PATH = "data/processed/transactions_cleaned.parquet"
+OUTPUT_SAMPLE_CSV_PATH = "data/processed/transactions_cleaned_sample.csv"
+SAMPLE_SIZE = 5000
+
+
+def clean_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    report_data = {"input_rows": len(df)}
+
+    df, na_counts, n_removed_missing = check_missing_critical(df)
+    report_data["missing_values"] = {"per_column_na_counts": na_counts, "rows_removed": n_removed_missing}
+
+    df, n_removed_dupes = dedupe_exact(df)
+    report_data["duplicates"] = {"rows_removed": n_removed_dupes}
+
+    df, category_counts, n_removed_categories = check_invalid_categories(df)
+    report_data["invalid_categories"] = {"per_check_invalid_counts": category_counts, "rows_removed": n_removed_categories}
+
+    out = df.copy()
+    out["is_amount_outlier"] = flag_amount_outliers(out["amount"])
+    out["is_zero_amount"] = flag_zero_amount(out["amount"])
+    out["is_balance_inconsistent"] = flag_balance_inconsistency(
+        out["oldbalanceOrg"], out["amount"], out["newbalanceOrig"]
+    )
+
+    report_data["amount_outliers"] = {"rows_flagged": int(out["is_amount_outlier"].sum())}
+    report_data["zero_amount"] = {"rows_flagged": int(out["is_zero_amount"].sum())}
+    report_data["balance_inconsistent"] = {"rows_flagged": int(out["is_balance_inconsistent"].sum())}
+    report_data["output_rows"] = len(out)
+
+    return out, report_data
+
+
+def main():
+    df = pd.read_parquet(INPUT_PARQUET_PATH)
+    cleaned, report_data = clean_dataset(df)
+    Path(OUTPUT_PARQUET_PATH).parent.mkdir(parents=True, exist_ok=True)
+    cleaned.to_parquet(OUTPUT_PARQUET_PATH, index=False)
+    sample = build_stratified_sample(cleaned, sample_size=SAMPLE_SIZE, seed=42)
+    sample.to_csv(OUTPUT_SAMPLE_CSV_PATH, index=False)
+    print(f"Input rows: {report_data['input_rows']}")
+    print(f"Output rows: {report_data['output_rows']}")
+    print(f"Wrote {len(cleaned)} rows to {OUTPUT_PARQUET_PATH}")
+    print(f"Wrote {len(sample)} sample rows to {OUTPUT_SAMPLE_CSV_PATH}")
+
+
+if __name__ == "__main__":
+    main()
