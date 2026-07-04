@@ -165,7 +165,12 @@ def load_raw_transactions(csv_path: str = INPUT_CSV_PATH) -> pd.DataFrame:
         "isFraud": "int8",
         "isFlaggedFraud": "int8",
     }
-    return pd.read_csv(csv_path, dtype=dtype)
+    df = pd.read_csv(csv_path, dtype=dtype)
+    required_columns = set(dtype.keys())
+    missing = required_columns - set(df.columns)
+    if missing:
+        raise ValueError(f"Input CSV is missing required columns: {sorted(missing)}")
+    return df
 
 
 def build_stratified_sample(df: pd.DataFrame, sample_size: int = SAMPLE_SIZE, seed: int = 42) -> pd.DataFrame:

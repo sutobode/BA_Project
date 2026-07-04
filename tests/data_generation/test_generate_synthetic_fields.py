@@ -239,6 +239,18 @@ def test_load_raw_transactions_applies_expected_dtypes(tmp_path):
     assert str(df["type"].dtype) == "category"
 
 
+def test_load_raw_transactions_raises_value_error_on_missing_required_column(tmp_path):
+    # Missing "isFraud" column entirely.
+    csv_content = (
+        "step,type,amount,nameOrig,oldbalanceOrg,newbalanceOrig,nameDest,oldbalanceDest,newbalanceDest,isFlaggedFraud\n"
+        "1,PAYMENT,9839.64,C123,170136.0,160296.36,M456,0.0,0.0,0\n"
+    )
+    csv_path = tmp_path / "missing_column.csv"
+    csv_path.write_text(csv_content)
+    with pytest.raises(ValueError, match="isFraud"):
+        gsf.load_raw_transactions(str(csv_path))
+
+
 def test_build_stratified_sample_preserves_fraud_ratio_approximately():
     n = 10_000
     df = pd.DataFrame({"step": np.arange(1, n + 1), "isFraud": [1] * 13 + [0] * (n - 13)})

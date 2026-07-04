@@ -36,3 +36,16 @@ def test_distance_between_countries_far_apart_is_large():
     b = np.array(["VN"])
     d = country_centroids.distance_between_countries(a, b)
     assert d[0] > 10000
+
+
+def test_offset_mismatch_index_never_equals_billing_index():
+    # generate_ip_country in generate_synthetic_fields.py relies on the invariant
+    # that (billing_idx + offset) % N_COUNTRIES != billing_idx for every
+    # billing_idx in range(N_COUNTRIES) and every offset in range(1, N_COUNTRIES).
+    # This is a pure arithmetic property (no randomness) - verify it exhaustively
+    # rather than trusting the statistical mismatch-rate tests alone.
+    n = country_centroids.N_COUNTRIES
+    billing_idx = np.arange(n).reshape(-1, 1)
+    offset = np.arange(1, n).reshape(1, -1)
+    mismatch_idx = (billing_idx + offset) % n
+    assert not np.any(mismatch_idx == billing_idx)

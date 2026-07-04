@@ -37,6 +37,21 @@ def test_cramers_v_independent_association_is_near_zero():
     assert cl.cramers_v(feature, label) < 0.05
 
 
+def test_cramers_v_high_cardinality_sparse_table_is_not_biased_upward():
+    # Reproduces the reviewer's finding: a high-cardinality field (1500 possible
+    # categories, most appearing only a handful of times) generated completely
+    # independently of the label, sampled at a modest size (n=5000) so the
+    # contingency table is sparse. The uncorrected (biased) Cramer's V formula
+    # scores this ~0.53 (a spurious FAIL against the 0.5 threshold) purely from
+    # sparse-table bias, even though there is zero true association by
+    # construction. The bias-corrected formula must report a low value instead.
+    rng = np.random.default_rng(0)
+    n = 5000
+    feature = pd.Series(rng.integers(0, 1500, size=n).astype(str))
+    label = pd.Series(rng.integers(0, 2, size=n))
+    assert cl.cramers_v(feature, label) < 0.15
+
+
 def test_check_all_fields_flags_perfectly_separating_numeric_fields():
     n = 1000
     label = pd.Series([0] * 500 + [1] * 500)

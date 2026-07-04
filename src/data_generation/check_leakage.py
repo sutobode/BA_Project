@@ -24,14 +24,27 @@ def _chi2_statistic(contingency: pd.DataFrame) -> float:
 
 
 def cramers_v(feature: pd.Series, label: pd.Series) -> float:
+    """Bias-corrected Cramer's V (Bergsma & Wicher, 2013).
+
+    The naive/uncorrected formula sqrt((chi2/n) / min(r-1, k-1)) is biased
+    upward for sparse contingency tables (e.g. high-cardinality categorical
+    fields on modest sample sizes), which can produce spurious high scores
+    even when the feature has zero true association with the label. The
+    bias correction subtracts the expected small-sample noise from phi2 and
+    the row/column counts before taking the ratio.
+    """
     contingency = pd.crosstab(feature, label)
     chi2 = _chi2_statistic(contingency)
     n = contingency.to_numpy().sum()
     r, k = contingency.shape
-    denom = min(r - 1, k - 1)
-    if denom == 0:
+    phi2 = chi2 / n
+    phi2_corrected = max(0.0, phi2 - (k - 1) * (r - 1) / (n - 1))
+    k_corrected = k - (k - 1) ** 2 / (n - 1)
+    r_corrected = r - (r - 1) ** 2 / (n - 1)
+    denom = min(k_corrected - 1, r_corrected - 1)
+    if denom <= 0:
         return 0.0
-    return float(np.sqrt((chi2 / n) / denom))
+    return float(np.sqrt(phi2_corrected / denom))
 
 
 from pathlib import Path
