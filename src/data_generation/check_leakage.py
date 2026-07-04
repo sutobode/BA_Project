@@ -145,7 +145,9 @@ def check_all_fields(df: pd.DataFrame, label_col: str = "isFraud") -> pd.DataFra
 
 
 def build_data_dictionary_markdown(leakage_report: pd.DataFrame) -> str:
+    # Build lookup dicts for both metric_value and metric_type
     metric_by_field = leakage_report.set_index("field_name")["metric_value"].to_dict()
+    metric_type_by_field = leakage_report.set_index("field_name")["metric_type"].to_dict()
     lines = [
         "# Data Dictionary — Synthetic Contextual Fields\n\n",
         "| field_name | data_type | unit | valid_range | generation_type | logic_or_formula | "
@@ -153,10 +155,22 @@ def build_data_dictionary_markdown(leakage_report: pd.DataFrame) -> str:
         "|---|---|---|---|---|---|---|---|\n",
     ]
     for meta in FIELD_METADATA:
-        metric = metric_by_field.get(meta["field_name"], "n/a")
+        metric_value = metric_by_field.get(meta["field_name"], "n/a")
+        metric_type = metric_type_by_field.get(meta["field_name"], "unknown")
+
+        # Format metric with type label
+        if metric_value == "n/a":
+            metric_str = "n/a"
+        elif metric_type == "auc":
+            metric_str = f"{metric_value} (AUC)"
+        elif metric_type == "cramers_v":
+            metric_str = f"{metric_value} (Cramér's V)"
+        else:
+            metric_str = str(metric_value)
+
         lines.append(
             f"| `{meta['field_name']}` | {meta['data_type']} | {meta['unit']} | {meta['valid_range']} | "
-            f"{meta['generation_type']} | {meta['logic_or_formula']} | {meta['business_assumption']} | {metric} |\n"
+            f"{meta['generation_type']} | {meta['logic_or_formula']} | {meta['business_assumption']} | {metric_str} |\n"
         )
     return "".join(lines)
 

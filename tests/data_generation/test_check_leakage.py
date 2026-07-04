@@ -74,3 +74,28 @@ def test_build_data_dictionary_markdown_contains_all_fields():
     for meta in cl.FIELD_METADATA:
         assert f"`{meta['field_name']}`" in markdown
     assert markdown.startswith("# Data Dictionary")
+
+
+def test_build_data_dictionary_markdown_labels_metric_with_type():
+    report = pd.DataFrame([
+        {"field_name": m["field_name"], "metric_type": m["metric_type"], "metric_value": 0.1, "status": "PASS"}
+        for m in cl.FIELD_METADATA
+    ])
+    markdown = cl.build_data_dictionary_markdown(report)
+    # Check that AUC-type fields have (AUC) label
+    auc_fields = [m["field_name"] for m in cl.FIELD_METADATA if m["metric_type"] == "auc"]
+    for field_name in auc_fields:
+        assert f"`{field_name}`" in markdown
+        # Find the row for this field and verify it contains (AUC)
+        lines = markdown.split("\n")
+        field_line = [l for l in lines if f"`{field_name}`" in l][0]
+        assert "0.1 (AUC)" in field_line, f"Field {field_name} should have (AUC) label"
+
+    # Check that Cramér's V-type fields have (Cramér's V) label
+    cramers_fields = [m["field_name"] for m in cl.FIELD_METADATA if m["metric_type"] == "cramers_v"]
+    for field_name in cramers_fields:
+        assert f"`{field_name}`" in markdown
+        # Find the row for this field and verify it contains (Cramér's V)
+        lines = markdown.split("\n")
+        field_line = [l for l in lines if f"`{field_name}`" in l][0]
+        assert "0.1 (Cramér's V)" in field_line, f"Field {field_name} should have (Cramér's V) label"
