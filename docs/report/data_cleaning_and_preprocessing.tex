@@ -1,0 +1,79 @@
+% ============================================================================
+% Section: Data Cleaning and Preprocessing
+% ----------------------------------------------------------------------------
+% Assumes: \usepackage[utf8]{inputenc}, \usepackage[T1]{fontenc}
+%          \usepackage{booktabs}, \usepackage{array}
+% Adjust \label{...} keys if they collide with existing labels in the report.
+%
+% NOTE: this section documents the Data Cleaning stage, which operates on
+% the output of the Data Generation stage (see the Data Sources and Data
+% Generation section / data_sources_and_generation.tex): the 6,362,620-row,
+% 23-column dataset produced after the twelve synthetic contextual fields
+% were added and validated. This section does not repeat that material.
+% ============================================================================
+
+\section{Data Cleaning and Preprocessing}
+
+This section documents the data-cleaning stage applied to the enriched transactional dataset (6,362,620 rows, 23 columns) produced by the data-generation stage. Four checks were required of this stage --- missing values, duplicate records, invalid categorical values, and outliers --- and each is reported below together with the methodology used, the exact result on the full dataset, and, where relevant, the reasoning behind the remediation chosen. As with the generation stage, every check was implemented as a vectorized, unit-tested function and executed against the complete dataset rather than a sample, so that the reported counts are exact rather than estimated.
+
+\paragraph{Governing principle.} A single principle governs every decision in this section: \emph{a row is only removed when it represents genuine structural corruption; any anomaly that could plausibly be fraud-relevant is flagged, never removed.} This principle was adopted because a fraud dataset's rare positive class is precisely the part of the data most likely to look ``unusual'' by ordinary statistical criteria, so an indiscriminate cleaning procedure risks discarding the very signal the downstream model is meant to learn. Sections~\ref{subsec:missing-values} through~\ref{subsec:invalid-values} describe checks that \emph{remove} rows (all of which, as reported below, removed zero rows on the actual dataset); Section~\ref{subsec:outlier-treatment} describes checks that \emph{flag} rows without removing them.
+
+\subsection{Missing Values}
+\label{subsec:missing-values}
+
+\paragraph{Methodology.} Missing-value counts were computed across all 23 columns of the dataset, so that any column exhibiting missingness would be visible in the resulting report regardless of whether that column triggers removal. Row removal, however, was scoped narrowly to four \emph{critical} columns --- \texttt{step}, \texttt{type}, \texttt{amount}, and \texttt{isFraud} --- on the reasoning that a transaction record missing any of these four values cannot be meaningfully analyzed for fraud at all, whereas a missing value in a less central column need not disqualify the entire record. A record is removed only if at least one of these four columns is null; missingness elsewhere is recorded in the report but does not trigger removal.
+
+\paragraph{Result.} No missing values were found in any of the 23 columns on the full 6,362,620-row dataset; consequently, zero rows were removed by this check. This outcome is consistent with the dataset's origin as simulator output rather than manually entered or externally merged data, where missingness is structurally unlikely. The check nonetheless remains part of the pipeline as a defensive safeguard: were this cleaning procedure ever applied to a differently sourced or less curated dataset, the same logic would correctly identify and remove records with missing critical fields, and the per-column missingness counts would surface any less-critical column requiring attention.
+
+\subsection{Duplicates}
+\label{subsec:duplicates}
+
+\paragraph{Methodology.} Exact, full-row duplicates (records identical across all 23 columns) were identified and removed. This scope was chosen deliberately narrower than a partial-key duplicate definition (e.g.\ matching only on transaction identifiers): a full-row duplicate carries no information beyond its first occurrence and can be removed with zero risk of discarding a distinct fraud event, whereas two records that merely share a subset of fields (for instance, the same origin account and step) may represent two genuinely distinct transactions and were therefore not treated as duplicates.
+
+\paragraph{Result.} No full-row duplicates were found among the 6,362,620 records; zero rows were removed by this check. As with the missing-value check, this result is expected for simulator-generated data but the check remains in the pipeline to guard against duplication that could be introduced by, for example, a retried ingestion job or a concatenation of overlapping data exports in a future run.
+
+\subsection{Invalid Values}
+\label{subsec:invalid-values}
+
+\paragraph{Methodology.} Every categorical and Boolean column introduced or retained through the generation stage was validated against its known set of legitimate values, and any record violating one or more of these checks was removed. Concretely: the \texttt{type} column was validated against the five transaction types defined by the base dataset (\texttt{CASH\_IN}, \texttt{CASH\_OUT}, \texttt{DEBIT}, \texttt{PAYMENT}, \texttt{TRANSFER}); the four synthetic categorical fields (\texttt{browser}, \texttt{device\_type}, \texttt{billing\_country}, \texttt{ip\_country}) were validated against the \emph{exact} value sets used to generate them in the previous stage, imported directly from the generation module rather than re-declared, so that the two stages cannot silently drift out of agreement with one another; and the three synthetic Boolean fields (\texttt{is\_night\_transaction}, \texttt{new\_device\_flag}, \texttt{shipping\_billing\_mismatch}) were validated against the set \(\{\mathrm{True}, \mathrm{False}\}\). A record failing any one of these eight checks was removed, and the count of violations was recorded separately for each individual check.
+
+\paragraph{Result.} Zero invalid values were found across all eight checks; zero rows were removed. This confirms that the generation stage's output is internally self-consistent with its own declared category sets, as would be expected of programmatically generated data, and validates that the cross-stage import of value sets (rather than a hand-maintained duplicate list) functioned correctly.
+
+\subsection{Outlier Treatment}
+\label{subsec:outlier-treatment}
+
+Unlike the three preceding checks, outlier treatment did surface substantial, genuine findings on the real dataset, and --- consistent with the governing principle stated above --- none of them resulted in row removal.
+
+\paragraph{Amount outliers.} The transaction \texttt{amount} column was screened using Tukey's interquartile-range (IQR) fence,\footnote{Tukey, J. W. (1977). \emph{Exploratory Data Analysis}. Addison-Wesley.} which flags any value falling outside \([Q_1 - 1.5 \times \mathrm{IQR},\ Q_3 + 1.5 \times \mathrm{IQR}]\), where \(Q_1\) and \(Q_3\) are the first and third quartiles of the full-column distribution. Applied to the complete dataset, this rule flagged \textbf{338,078 transactions (5.31\%)} as statistical outliers in transaction value. These records were \emph{not} removed: in a fraud-detection context, an unusually large transaction amount is exactly the kind of signal a model should be able to learn from, and removing it as ``noise'' would discard information rather than clean it. Instead, a Boolean column \texttt{is\_amount\_outlier} was added, so that downstream feature engineering or modeling can use, ignore, or specifically stratify on this indicator as appropriate.
+
+\paragraph{Zero-amount transactions.} A separate, narrower check flagged transactions with \(\texttt{amount} = 0\), of which \textbf{16} were found, all of type \texttt{CASH\_OUT}. Critically, all 16 of these records are already labeled \(\texttt{isFraud} = 1\): every zero-amount transaction observed in the dataset is a confirmed fraud case, plausibly consistent with an attacker probing account access or system behavior prior to a genuine cash-out attempt. Because these 16 records constitute a disproportionately informative (if extremely rare) subset of the positive class, removing them under a naive ``implausible value'' cleaning rule would have discarded real fraud examples from the dataset. They were instead flagged via a Boolean column \texttt{is\_zero\_amount} and retained in full.
+
+\paragraph{Balance inconsistency.} The final check compared each transaction's recorded balances against the identity \(\texttt{oldbalanceOrg} - \texttt{amount} = \texttt{newbalanceOrig}\), flagging any row where the absolute discrepancy exceeded a tolerance of 0.01. This check flagged \textbf{5,118,892 transactions (80.45\%)} of the dataset --- a strikingly high proportion that, taken at face value, might appear to indicate a severe data-quality problem. Investigation showed otherwise: this discrepancy is a well-documented structural characteristic of the PaySim simulator itself, which frequently does not track destination-account balances accurately, particularly for transactions directed to merchant accounts, and is unrelated to any error introduced during data ingestion, generation, or cleaning. Given the scale of this proportion, removing or ``correcting'' these records was neither feasible (it would discard four-fifths of the dataset) nor appropriate (there is no error to correct); the finding was instead documented explicitly, and a Boolean column \texttt{is\_balance\_inconsistent} was added so that the characteristic is visible to, and can be accounted for by, any subsequent analysis rather than being silently absorbed or mistaken for noise.
+
+\subsection{Before/After Summary}
+\label{subsec:before-after-summary}
+
+Table~\ref{tab:cleaning-before-after} summarizes all six checks performed, the number of records affected by each, and the action taken, measured on the complete 6,362,620-row dataset. The three structural checks (missing values, duplicates, invalid values) removed zero rows in total; the three flag-based checks added one Boolean column each without altering row count. The dataset therefore grows from 23 to \textbf{26 columns} while its row count and fraud rate (0.1291\%) remain unchanged from the generation stage, confirming that the cleaning stage neither discarded data nor altered the class distribution that the modeling stage will need to address.
+
+\begin{table}[htbp]
+\centering
+\caption{Before/after summary of the data-cleaning checks (6,362,620 rows)}
+\label{tab:cleaning-before-after}
+\footnotesize
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+\textbf{Check} & \textbf{Rows before} & \textbf{Rows affected} & \textbf{Action} \\
+\midrule
+Missing values (critical columns) & 6,362,620 & 0 & Removed \\
+Duplicates (full-row) & 6,362,620 & 0 & Removed \\
+Invalid categorical/Boolean values & 6,362,620 & 0 & Removed \\
+Amount outliers (Tukey IQR) & 6,362,620 & 338,078 (5.31\%) & Flagged, retained \\
+Zero-amount transactions & 6,362,620 & 16 & Flagged, retained \\
+Balance inconsistency & 6,362,620 & 5,118,892 (80.45\%) & Flagged, retained \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Implementation and verification.} As with the generation stage, all six checks were implemented as vectorized \texttt{pandas}/\texttt{numpy} functions --- no row-wise iteration over the 6.36-million-row dataset --- composed by a single orchestrating function that applies the three removal checks first and the three flagging checks second, consistent with the governing principle stated at the start of this section. The implementation was developed test-first, with eighteen unit tests covering both the individual checks (using small, hand-constructed inputs designed to exercise each removal and flagging condition) and the orchestrating function as a whole; all eighteen tests pass. The before/after report in Table~\ref{tab:cleaning-before-after} is, like the data dictionary described in the previous section, generated programmatically by the same code that performs the checks, rather than transcribed by hand, so that the reported counts cannot drift out of agreement with the executed logic. Running the pipeline against the full dataset reproduced, to the exact record, the figures obtained during the initial diagnostic survey that motivated this design, confirming the implementation's correctness end-to-end.
+
+\paragraph{Limitations.} The Tukey 1.5\(\times\)IQR fence is a widely used but not uniquely correct convention for defining a statistical outlier; a later modeling stage that finds this definition too permissive or too strict for its purposes may reasonably adopt a different threshold without needing to revisit this section's methodology. Both outlier-related flags (\texttt{is\_amount\_outlier} and \texttt{is\_balance\_inconsistent}) mark rows without asserting that the flagged rows are fraudulent, or that the unflagged rows are not; the decision of whether and how to incorporate these indicators as model features is left to the feature-engineering and modeling stage. Finally, the invalid-value checks in Section~\ref{subsec:invalid-values} validate against the specific category sets used during the current run of the generation stage; should that stage's category sets be extended or regenerated with different parameters in the future, this cleaning stage will automatically validate against the updated sets, but any externally sourced data merged in outside that pipeline would need its categories reconciled against the same reference sets before being cleaned by this procedure.
