@@ -113,7 +113,7 @@ Row count không đổi: 6.362.620 dòng, 26 cột (23 cột từ Giai đoạn 1
 | # | Vấn đề phát hiện | Cách phát hiện | Cách xử lý | Kết quả sau xử lý |
 |---|---|---|---|---|
 | 1 | `customer_account_age_days` vượt ngưỡng leakage thật (AUC 0,8753 > 0,75) khi chạy trên 6,36M dòng thật | Chạy leakage check lần đầu trên dữ liệu thật | Giảm hệ số fraud (median 150 → 275 ngày), sinh lại | AUC 0,6689 — PASS |
-| 2 | Công thức Cramér's V gốc bị lệch dương (bias) với field cardinality lớn — `device_id` có thể báo FAIL giả (~0,48) nếu chạy trên mẫu nhỏ hơn, dù không có tương quan thật | Review độc lập, tự đạo hàm lại toán thay vì tin kết quả cũ | Thay bằng Cramér's V hiệu chỉnh bias (Bergsma-Wicher) | `device_id`: 0,0879 → 0,0; vẫn 12/12 PASS, ổn định hơn theo cỡ mẫu |
+| 2 | Công thức Cramér's V gốc bị lệch dương (bias) với field cardinality lớn — `device_id` có thể báo FAIL giả (~0,48) nếu chạy trên mẫu nhỏ hơn, dù không có tương quan thật | Review độc lập, tự đạo hàm lại toán thay vì tin kết quả cũ | Thay bằng Cramér's V hiệu chỉnh bias (Bergsma, 2013) | `device_id`: 0,0879 → 0,0; vẫn 12/12 PASS, ổn định hơn theo cỡ mẫu |
 | 3 | Data dictionary không phân biệt rõ giá trị nào là AUC, giá trị nào là Cramér's V | Review tổng thể toàn nhánh | Thêm nhãn `(AUC)` / `(Cramér's V)` vào từng giá trị | Đọc rõ ràng, không nhầm thang đo |
 | 4 | Subagent xác minh dữ liệu thật (Task 8, giai đoạn Cleaning) bị ngắt giữa chừng do hết giới hạn phiên làm việc | Theo dõi trạng thái subagent | Tự kiểm tra lại độc lập từ file parquet thật (không tin báo cáo dở dang), hoàn tất commit còn thiếu | Số liệu khớp chính xác 100% với khảo sát ban đầu |
 

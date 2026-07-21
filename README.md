@@ -152,7 +152,7 @@ sequenceDiagram
 
     Dev->>Check: Review độc lập (không tin báo cáo cũ, tự đạo hàm lại toán)
     Check->>Dev: Phát hiện Cramér's V gốc bị lệch dương với field cardinality lớn<br/>(device_id: 0.0879 trên 6.3M dòng, nhưng ~0.48 trên mẫu 200k dòng<br/>dù device_id độc lập hoàn toàn với fraud theo thiết kế)
-    Dev->>Check: Thay bằng Cramér's V hiệu chỉnh bias (Bergsma-Wicher)
+    Dev->>Check: Thay bằng Cramér's V hiệu chỉnh bias (Bergsma, 2013)
     Check->>Dev: device_id: 0.0879 -> 0.0, vẫn 12/12 PASS, ổn định hơn theo sample size
 ```
 

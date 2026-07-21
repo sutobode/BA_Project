@@ -24,7 +24,7 @@ def _chi2_statistic(contingency: pd.DataFrame) -> float:
 
 
 def cramers_v(feature: pd.Series, label: pd.Series) -> float:
-    """Bias-corrected Cramer's V (Bergsma & Wicher, 2013).
+    """Bias-corrected Cramer's V (Bergsma, 2013).
 
     The naive/uncorrected formula sqrt((chi2/n) / min(r-1, k-1)) is biased
     upward for sparse contingency tables (e.g. high-cardinality categorical
