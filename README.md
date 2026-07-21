@@ -6,6 +6,7 @@ Tài liệu này là **nguồn tham khảo đầy đủ, tự chứa** — đọ
 - Spec sinh dữ liệu: [`docs/superpowers/specs/2026-07-03-synthetic-data-nguoi2-design.md`](docs/superpowers/specs/2026-07-03-synthetic-data-nguoi2-design.md) · Plan: [`...-nguoi2-plan.md`](docs/superpowers/plans/2026-07-03-synthetic-data-nguoi2-plan.md)
 - Spec cleaning: [`docs/superpowers/specs/2026-07-03-data-cleaning-design.md`](docs/superpowers/specs/2026-07-03-data-cleaning-design.md) · Plan: [`...-data-cleaning-plan.md`](docs/superpowers/plans/2026-07-03-data-cleaning-plan.md)
 - Data dictionary (tự sinh): [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) · Cleaning report (tự sinh): [`docs/CLEANING_REPORT.md`](docs/CLEANING_REPORT.md)
+- Tổng kết quá trình làm việc (quyết định, vấn đề đã phát hiện & xử lý): [`docs/PROJECT_SUMMARY.md`](docs/PROJECT_SUMMARY.md)
 
 ## 1. Tổng quan toàn bộ pipeline
 
