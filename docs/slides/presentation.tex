@@ -1,0 +1,394 @@
+% ============================================================================
+% Beamer slide deck: Data Generation & Cleaning Pipeline
+% Compile with pdflatex (or xelatex/lualatex) - standalone, self-contained.
+% ============================================================================
+\documentclass[aspectratio=169]{beamer}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{textcomp}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+\title[Fraud Data Pipeline]{Real-Time Payment Fraud Detection}
+\subtitle{Data Sources, Synthetic Generation, and Cleaning Pipeline}
+\author{}
+\institute{}
+\date{}
+
+\begin{document}
+
+% ----------------------------------------------------------------------------
+\begin{frame}
+\titlepage
+\end{frame}
+
+% ----------------------------------------------------------------------------
+\begin{frame}{Agenda}
+\tableofcontents
+\end{frame}
+
+% ============================================================================
+\section{Overview}
+% ============================================================================
+
+\begin{frame}{Project Overview}
+\begin{itemize}
+    \item Data foundation for a fraud-detection pipeline, built in two stages:
+    \begin{enumerate}
+        \item \textbf{Synthetic Data Generation} --- add 12 behavioral/contextual fields to the base transactional dataset
+        \item \textbf{Data Cleaning} --- validate and flag data-quality issues without destroying fraud signal
+    \end{enumerate}
+    \item Base dataset: \textbf{PaySim} (Kaggle), \textbf{6,362,620} transactions
+    \item Both stages processed the \textbf{complete dataset} --- no sampling, no shortcuts
+\end{itemize}
+
+\vspace{0.5cm}
+\begin{center}
+\Large
+Base Dataset (11 cols) \(\;\rightarrow\;\) Synthetic Generation (+12) \(\;\rightarrow\;\) Cleaning (+3) \(\;\rightarrow\;\) 26 cols
+\end{center}
+\end{frame}
+
+\begin{frame}{Development Process}
+\begin{center}
+\small
+Survey real data \(\rightarrow\) Design spec \(\rightarrow\) Implementation plan (TDD) \(\rightarrow\)\\
+Code task-by-task (RED \(\rightarrow\) GREEN \(\rightarrow\) commit) \(\rightarrow\) Independent review \(\rightarrow\)\\
+Run on full 6.36M rows \(\rightarrow\) Whole-branch review
+\end{center}
+\vspace{0.3cm}
+\begin{itemize}
+    \item Every design decision is based on \textbf{measured} properties of the real data, not assumptions
+    \item Every function is \textbf{test-driven}: test written first, then implementation
+    \item Every task is \textbf{independently reviewed} for spec compliance and code quality
+    \item \textbf{70 automated tests}, all passing
+\end{itemize}
+\end{frame}
+
+% ============================================================================
+\section{Base Dataset}
+% ============================================================================
+
+\begin{frame}{Base Dataset: PaySim}
+\begin{itemize}
+    \item \emph{Online Payments Fraud Detection Dataset} (Kaggle), from the PaySim agent-based mobile-money simulator (Lopez-Rojas et al., 2016)
+    \item Simulates customers and merchants transacting over one month
+    \item A subset of transactions is labeled fraudulent --- \textbf{account-takeover} behavior
+\end{itemize}
+
+\vspace{0.3cm}
+\begin{table}
+\centering\footnotesize
+\begin{tabular}{ll}
+\toprule
+\textbf{Records} & 6,362,620 \\
+\textbf{Columns} & 11 (step, type, amount, balances, identifiers, isFraud, isFlaggedFraud) \\
+\textbf{Fraud rate} & 8,213 / 6,362,620 = \textbf{0.1291\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+\end{frame}
+
+\begin{frame}{Empirical Profiling --- Three Findings That Shaped the Design}
+\begin{enumerate}
+    \item \textbf{Fraud is confined to two transaction types.}\\
+    \texttt{TRANSFER} (4,097/532,909) and \texttt{CASH\_OUT} (4,116/2,237,500) only.\\
+    \texttt{PAYMENT}, \texttt{CASH\_IN}, \texttt{DEBIT} \(\rightarrow\) zero fraud.\\
+    \(\Rightarrow\) fraud here = \textbf{account-takeover}, not checkout fraud.
+    \vspace{0.2cm}
+    \item \textbf{Customer history is negligible.}\\
+    99.85\% of \texttt{nameOrig} values are unique (appear once).\\
+    \(\Rightarrow\) fields generated at \textbf{row level}, not via a customer profile.
+    \vspace{0.2cm}
+    \item \textbf{\texttt{step} allows exact time derivation.}\\
+    Elapsed hours, no gaps, range 1--743.\\
+    \(\Rightarrow\) time-of-day features are \textbf{derived}, not sampled.
+\end{enumerate}
+\end{frame}
+
+% ============================================================================
+\section{Synthetic Data Generation}
+% ============================================================================
+
+\begin{frame}{Why Synthetic Data?}
+The base dataset has only raw financial fields. It lacks:
+\begin{itemize}
+    \item Device fingerprinting
+    \item IP-to-billing geolocation consistency
+    \item Account tenure
+    \item Payment-retry behavior
+    \item Temporal usage patterns
+\end{itemize}
+\vspace{0.3cm}
+\(\Rightarrow\) \textbf{12 contextual fields} generated in Python (\texttt{Faker} + custom business logic).
+\end{frame}
+
+\begin{frame}{Generation Methodology}
+\begin{itemize}
+    \item Fully vectorized \texttt{numpy}/\texttt{pandas} --- no row-wise loops on 6.36M rows
+    \item Single seeded RNG (\texttt{seed=42}) --- exact reproducibility, verified
+    \item 3 focused modules: geo-distance utility, field generation, leakage validation
+    \item Developed \textbf{test-first}: \textbf{52 unit tests}, all passing
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Five Design Principles}
+\begin{enumerate}
+    \item \textbf{Row-level generation} --- no persistent customer profile (justified by data)
+    \item \textbf{Selective conditioning} --- only behaviorally plausible fields depend on \texttt{isFraud}
+    \item \textbf{Bounded effect sizes} --- conditional parameters capped at 2--4\(\times\) baseline
+    \item \textbf{Deterministic derivation} where possible --- formula over randomness
+    \item \textbf{Post-hoc, objective leakage validation} --- measured, not judged
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{The 12 Synthetic Fields (1/2)}
+\centering\scriptsize
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Field} & \textbf{Mechanism} & \textbf{Base \(\rightarrow\) Fraud} \\
+\midrule
+\texttt{hour\_of\_day} & Derived & (step\,--\,1) mod 24 \\
+\texttt{is\_night\_transaction} & Derived & hour \(\in\) [0,5] \\
+\texttt{customer\_account\_age\_days} & Log-normal & median 400 \(\rightarrow\) 275 days \\
+\texttt{device\_id} & Independent & pool of 50,000 UUIDs \\
+\texttt{browser} & Independent & Chrome 55\% / Safari 20\% / \dots \\
+\texttt{device\_type} & Independent & mobile 65\% / desktop 30\% / tablet 5\% \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{The 12 Synthetic Fields (2/2)}
+\centering\scriptsize
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Field} & \textbf{Mechanism} & \textbf{Base \(\rightarrow\) Fraud} \\
+\midrule
+\texttt{new\_device\_flag} & Bernoulli & 4\% \(\rightarrow\) 12\% \\
+\texttt{billing\_country} & Independent & 20 fixed countries \\
+\texttt{ip\_country} & Bernoulli & match rate 93\% \(\rightarrow\) 80\% \\
+\texttt{ip\_billing\_distance\_km} & Derived & haversine(ip, billing) \\
+\texttt{shipping\_billing\_mismatch} & Bernoulli & 5\% \(\rightarrow\) 15\% \\
+\texttt{failed\_payment\_attempts\_24h} & Poisson & mean 0.15 \(\rightarrow\) 0.6 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.4cm}
+\footnotesize Full formulas, ranges, and business assumptions: Data Dictionary (auto-generated).
+\end{frame}
+
+% ============================================================================
+\section{Leakage Validation}
+% ============================================================================
+
+\begin{frame}{Leakage Validation Methodology}
+A field that correlates too strongly with \texttt{isFraud} trivializes the model. Each field is checked \textbf{objectively} after generation:
+\begin{itemize}
+    \item \textbf{Continuous / Boolean fields:} univariate AUC, \(\max(\mathrm{AUC}, 1-\mathrm{AUC})\) --- direction-agnostic
+    \item \textbf{Categorical fields:} Cram\'er's V with Bergsma's (2013) small-sample bias correction
+\end{itemize}
+\vspace{0.3cm}
+\textbf{Fail thresholds (fixed in advance):} AUC \(\geq 0.75\)\quad or\quad corrected Cram\'er's V \(\geq 0.50\)
+\end{frame}
+
+\begin{frame}{Issue \#1 Found and Fixed: Account Age}
+\begin{columns}
+\begin{column}{0.48\textwidth}
+\textbf{Before}
+\begin{itemize}
+    \item Fraud median: 150 days
+    \item Baseline median: 400 days
+    \item AUC = \textbf{0.8753}
+    \item \textcolor{red}{FAIL} (threshold 0.75)
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{After}
+\begin{itemize}
+    \item Fraud median narrowed to \textbf{275 days}
+    \item Signal reduced, not removed
+    \item AUC = \textbf{0.6689}
+    \item \textcolor{green!50!black}{PASS}
+\end{itemize}
+\end{column}
+\end{columns}
+\vspace{0.4cm}
+Found on the \textbf{first real run} against all 6.36M rows --- not a subsample.
+\end{frame}
+
+\begin{frame}{Issue \#2 Found and Fixed: Cram\'er's V Bias}
+\begin{itemize}
+    \item \texttt{device\_id} has 50,000 distinct values --- generated \textbf{independently} of fraud by construction
+    \item Naive Cram\'er's V formula is upward-biased on sparse contingency tables
+    \item On a smaller data subset, the naive formula reported \(\approx 0.48\) --- dangerously close to the 0.50 threshold, despite zero true correlation
+\end{itemize}
+\vspace{0.3cm}
+\textbf{Fix:} substituted Bergsma's (2013) bias-corrected estimator everywhere.
+\vspace{0.3cm}
+\begin{center}
+\texttt{device\_id} corrected association: \(0.0879 \rightarrow \mathbf{0.0000}\)
+\end{center}
+Found via \textbf{independent review of the validation code}, not just its output.
+\end{frame}
+
+\begin{frame}{Final Leakage Validation Results}
+\centering\scriptsize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Field} & \textbf{Metric} & \textbf{Value} & \textbf{Status} \\
+\midrule
+\texttt{hour\_of\_day} & AUC & 0.6336 & PASS \\
+\texttt{is\_night\_transaction} & AUC & 0.6217 & PASS \\
+\texttt{customer\_account\_age\_days} & AUC & 0.6689 & PASS \\
+\texttt{device\_id} & Cram\'er's V & 0.0000 & PASS \\
+\texttt{browser} & Cram\'er's V & 0.0000 & PASS \\
+\texttt{device\_type} & Cram\'er's V & 0.0004 & PASS \\
+\texttt{new\_device\_flag} & AUC & 0.5419 & PASS \\
+\texttt{billing\_country} & Cram\'er's V & 0.0000 & PASS \\
+\texttt{ip\_country} & Cram\'er's V & 0.0049 & PASS \\
+\texttt{ip\_billing\_distance\_km} & AUC & 0.5651 & PASS \\
+\texttt{shipping\_billing\_mismatch} & AUC & 0.5495 & PASS \\
+\texttt{failed\_payment\_attempts\_24h} & AUC & 0.6589 & PASS \\
+\bottomrule
+\end{tabular}
+\vspace{0.3cm}
+\begin{center}
+\Large \textbf{12 / 12 fields PASS} --- on the full 6,362,620-row dataset
+\end{center}
+\end{frame}
+
+\begin{frame}{Data Dictionary}
+\begin{itemize}
+    \item Every field documented: name, type, unit, range, mechanism, formula, business assumption, measured association
+    \item \textbf{Generated programmatically} by the same module that runs the leakage checks --- cannot drift from the code
+    \item Published in Markdown (satisfies Markdown/Excel deliverable requirement)
+\end{itemize}
+\vspace{0.3cm}
+\footnotesize
+\begin{tabular}{@{}lp{3cm}p{5cm}@{}}
+\toprule
+\textbf{Field} & \textbf{Generation} & \textbf{Assumption} \\
+\midrule
+\texttt{new\_device\_flag} & Bernoulli, \(p{=}0.04{\to}0.12\) & Unrecognized device \(\Rightarrow\) more likely fraud, not certain \\
+\texttt{failed\_payment\_attempts\_24h} & Poisson, \(\lambda{=}0.15{\to}0.6\) & Attackers retry before success \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+% ============================================================================
+\section{Data Cleaning}
+% ============================================================================
+
+\begin{frame}{Data Cleaning: Governing Principle}
+\begin{center}
+\Large
+\textbf{A row is removed only when it is structurally corrupt.}\\[0.3cm]
+\textbf{Anything that could be fraud signal is flagged, never removed.}
+\end{center}
+\vspace{0.5cm}
+Rare fraud cases often look statistically ``unusual.'' An indiscriminate cleaning rule risks deleting exactly the signal the model needs to learn.
+\end{frame}
+
+\begin{frame}{Structural Checks --- All Clear}
+\centering
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Check} & \textbf{Result} \\
+\midrule
+Missing values (critical columns) & 0 removed \\
+Duplicates (full-row) & 0 removed \\
+Invalid categorical / Boolean values & 0 removed \\
+\bottomrule
+\end{tabular}
+\vspace{0.4cm}
+
+Plus a broader preliminary survey (negative balances, identifier format, \texttt{step} gaps, cross-field invariants) --- \textbf{all zero violations}.
+\vspace{0.3cm}
+
+The dataset is structurally clean. These checks remain as a safeguard for future, less-curated input.
+\end{frame}
+
+\begin{frame}{Outlier Treatment --- Real Findings, All Flagged}
+\begin{itemize}
+    \item \textbf{Amount outliers} (Tukey 1.5\(\times\)IQR fence): \textbf{338,078} transactions (5.31\%)\\
+    \small Large amounts can themselves be fraud signal --- kept, flagged.
+    \vspace{0.2cm}
+    \item \textbf{Zero-amount transactions}: \textbf{16} transactions, all \texttt{CASH\_OUT}\\
+    \small \textbf{All 16 are confirmed fraud} --- removing them would delete real fraud examples.
+    \vspace{0.2cm}
+    \item \textbf{Balance inconsistency}: \textbf{5,118,892} transactions (80.45\%)\\
+    \small A known PaySim characteristic (merchant balances untracked) --- \textbf{not a data error}.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Before / After Summary}
+\centering\scriptsize
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+\textbf{Check} & \textbf{Rows before} & \textbf{Rows affected} & \textbf{Action} \\
+\midrule
+Missing values & 6,362,620 & 0 & Removed \\
+Duplicates & 6,362,620 & 0 & Removed \\
+Invalid values & 6,362,620 & 0 & Removed \\
+Amount outliers & 6,362,620 & 338,078 (5.31\%) & Flagged, retained \\
+Zero-amount & 6,362,620 & 16 & Flagged, retained \\
+Balance inconsistency & 6,362,620 & 5,118,892 (80.45\%) & Flagged, retained \\
+\bottomrule
+\end{tabular}
+\vspace{0.4cm}
+\begin{center}
+23 columns \(\rightarrow\) \textbf{26 columns}. Row count and fraud rate (0.1291\%) unchanged.
+\end{center}
+\end{frame}
+
+% ============================================================================
+\section{Summary}
+% ============================================================================
+
+\begin{frame}{Implementation \& Testing}
+\begin{itemize}
+    \item \textbf{70 automated unit tests}, all passing (52 generation + 18 cleaning)
+    \item Test-driven development throughout: test first, then code
+    \item 100\% vectorized --- no per-row loops over 6.36M records
+    \item Single seeded RNG --- fully reproducible runs
+    \item Every task independently reviewed (spec compliance + code quality)
+    \item Whole-branch review at the end of each stage --- numbers re-verified independently, not just trusted
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Limitations}
+\begin{itemize}
+    \item Conditional generation parameters are \textbf{explicit business assumptions}, not empirically calibrated --- no public ground truth exists
+    \item \texttt{shipping\_billing\_mismatch} reframed to an account-takeover interpretation, consistent with PaySim's actual fraud mechanism
+    \item Fields generated at the \textbf{transaction level} (no customer profile) --- by design, given the data
+    \item The 1.5\(\times\)IQR fence is a convention, not the only valid threshold
+    \item Outlier/inconsistency flags mark rows; using them as model features is a modeling-stage decision
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Key Takeaways}
+\begin{itemize}
+    \item Full 6,362,620-row dataset processed end-to-end --- no sampling at any stage
+    \item 12 synthetic fields, \textbf{12/12} pass objective leakage validation
+    \item Cleaning preserves \textbf{100\% of rows}; 3 fraud-relevant anomalies flagged, not discarded
+    \item Validation caught \textbf{2 real issues} during development --- proof the process works, not a formality
+    \item Every artifact (data dictionary, cleaning report) is \textbf{auto-generated from code} --- cannot drift from what was executed
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\centering
+\Huge Thank You
+\vspace{0.5cm}
+
+\Large Questions?
+\end{frame}
+
+\end{document}
