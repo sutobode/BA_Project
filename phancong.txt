@@ -1,0 +1,458 @@
+Module
+Focus Area
+Key Tasks
+1
+Business Understanding & Data Generation
+• Define the business problem and key KPIs (fraud rate,false-positive rate, financial loss avoided)
+• Generate supplementary contextual/ behavioral data inPython
+• Produce a complete data dictionary
+2
+Exploratory Data Analysis (EDA)
+• Analyze distributions, outliers, and correlations
+• Quantify class imbalance and compare fraud ratesacross transaction types, channels, and time windows
+• Visualize fraud patterns (e.g., transaction amount vs.fraud likelihood, geographic mismatch patterns)
+3
+Data Cleaning
+• Handle missing values, duplicates, and inconsistentcategories
+• Treat outliers (e.g., implausible transaction amounts,invalid timestamps)
+• Document all cleaning decisions with before/aftercomparisons
+4
+Feature Engineering
+• Construct risk-signal features (velocity of transactionsper account, address mismatch flag, new-device flag,time-since-last-purchase)
+• Encode categorical variables and scale numericalfeatures
+• Address severe class imbalance (e.g., SMOTE,undersampling, class weights) and perform featureselection
+5
+Model Development
+• Train and compare classifiers: Logistic Regression,Random Forest, XGBoost / LightGBM for fraudprediction
+• Evaluate with metrics suited to imbalanced data: AUCPR, Precision/Recall, F1, and a cost-based metric (cost of missed fraud vs. cost of false alarms) 
+• Select an operating threshold that reflects the business trade-off between fraud loss and customer friction
+6
+Model Deployment
+• Package the model as an API (FastAPI or Flask) thatscores a transaction in real time
+• Build a demo interface (Streamlit) simulating a fraudanalyst review queue
+• Deploy to a cloud free tier (Render, Hugging FaceSpaces, or equivalent)
+7
+Model Monitoring
+• Track data drift by comparing incoming transactiondistributions to training data
+• Monitor performance metrics over time, includingprecision/recall on a rolling window
+• Build a simple monitoring dashboard (e.g., using theopen-source Evidently library) and define retrainingtriggers
+8
+Final Report & Presentation
+• Translate findings into risk-policy recommendations(e.g., which signals should trigger manual review vs.auto-block)
+• Discuss limitations and future improvements
+• Present to the class with a live or recorded demo
+
+
+
+
+
+
+
+**Module 1: Business Understanding & Data Generation**
+Trạng thái: Đạt một phần
+
+Đã đạt:
+- Domain của dự án là phát hiện gian lận thời gian thực.
+- README và tài liệu mô tả real-time fraud pipeline.
+- Dữ liệu nền có vẻ dùng bộ PaySim/Online Payments với các cột: `step`, `type`, `amount`, `nameOrig`, `oldbalanceOrg`, `newbalanceOrig`, `nameDest`, `oldbalanceDest`, `newbalanceDest`, `isFraud`.
+- Có các file liên quan: `docs/REALTIME_FRAUD_PIPELINE_DESIGN.md`, `fraud_pipeline/parsing.py`, `fraud_pipeline/source_csv.py`.
+
+Đạt một phần:
+- Có synthetic generation trong `fraud_pipeline/synthetic.py`, nhưng hiện chỉ clone event cũ với ID/thời gian mới.
+- Chưa tạo dữ liệu bối cảnh e-commerce thực tế như tuổi tài khoản, device/browser fingerprint, shipping/billing mismatch, số lần thanh toán thất bại, khoảng cách IP-country, hoặc hành vi theo thời gian trong ngày.
+
+Chưa đạt:
+- Không thấy file data dictionary.
+- Chưa có phần KPI kinh doanh rõ ràng như fraud rate, false-positive rate, financial loss avoided, customer friction, hoặc policy cho review queue.
+- Chưa có tài liệu mô tả giả định sinh dữ liệu synthetic.
+
+**Module 2: Exploratory Data Analysis**
+Trạng thái: Đạt một phần
+
+Đã đạt:
+- `model/train_model.py` có logic EDA.
+- `model/eda_summary.json` báo cáo tổng số giao dịch, số fraud, fraud rate, imbalance ratio, và phân bố loại giao dịch.
+- Có biểu đồ EDA trong `model/plots/`, gồm `fraud_by_type.png`, `amount_dist.png`, và `correlation_matrix.png`.
+
+Đạt một phần:
+- Đã định lượng class imbalance: fraud rate là `0.1291%`, imbalance ratio là `1:773`.
+- Có visualization fraud theo transaction type.
+
+Chưa đạt:
+- Chưa có notebook hoặc report EDA theo dạng narrative.
+- Chưa phân tích các synthetic contextual fields vì hiện chưa có các trường này.
+- Chưa có so sánh fraud rate theo kênh e-commerce, geographic mismatch, device/browser pattern, hoặc time window.
+- Chưa có phần insight kinh doanh rút ra từ EDA.
+
+**Module 3: Data Cleaning**
+Trạng thái: Đạt một phần
+
+Đã đạt:
+- `fraud_pipeline/parsing.py` validate CSV parsing và chuyển đổi numeric cơ bản.
+- `spark-app/stream_job.py` có schema parsing và xử lý invalid records.
+- `docs/REALTIME_FRAUD_PIPELINE_DESIGN.md` mô tả dead-letter queue cho lỗi parse/schema/join.
+- `fraud_pipeline/source_csv.py` validate tính nhất quán giữa các nguồn dữ liệu được tách.
+
+Đạt một phần:
+- Hệ thống xử lý invalid stream records ở mức vận hành.
+- Có kiểm tra đồng bộ source và event ID bị mismatch.
+
+Chưa đạt:
+- Chưa có notebook/script/report riêng cho data cleaning.
+- Chưa có phân tích missing values rõ ràng.
+- Chưa có báo cáo phát hiện/xử lý duplicate.
+- Chưa có báo cáo outlier treatment.
+- Chưa có so sánh before/after cleaning.
+
+**Module 4: Feature Engineering**
+Trạng thái: Đạt một phần
+
+Đã đạt:
+- `fraud_pipeline/features.py` tạo các risk features hữu ích:
+  `sender_balance_delta`, `receiver_balance_delta`, `sender_depletion_ratio`, `amount_to_balance_ratio`, `is_zero_balance_after`, `is_same_sender_receiver`, `sender_balance_inconsistent`, `receiver_balance_inconsistent`.
+- One-hot encoding cho transaction type được thực hiện trong `model/train_model.py`.
+- Có scaling bằng `StandardScaler`.
+- Imbalance được xử lý bằng `SMOTE` và `class_weight="balanced"`.
+
+Đạt một phần:
+- Rule-based velocity/risk signals có trong `fraud_pipeline/rules.py`, ví dụ fan-out, fan-in, structured split transfer, new counterparty large transfer, và cashout-after-inbound-chain.
+- Một số behavioral features realtime được tính ở tầng streaming/rule thay vì trong bảng feature offline cho ML.
+
+Chưa đạt:
+- Thiếu các contextual/e-commerce features theo đề bài:
+  `account_age_days`, `device_fingerprint`, `browser`, `shipping_billing_mismatch`, `failed_payment_attempts`, `ip_to_billing_country_distance`, `new_device_flag`, `time_since_last_purchase`.
+- Chưa thấy bước feature selection rõ ràng.
+- Chưa có data dictionary cho engineered/synthetic fields.
+
+**Module 5: Model Development**
+Trạng thái: Đạt một phần
+
+Đã đạt:
+- `model/train_model.py` train `RandomForestClassifier`.
+- Xử lý imbalance bằng `SMOTE`.
+- Có train/validation/test split.
+- Có tuning threshold trên validation data.
+- Đánh giá bằng AUC-PR, AUC-ROC, F1, precision, recall, confusion matrix.
+- Lưu model artifacts và evaluation results.
+- `model/eval_results.json` hiện cho kết quả rất cao: AUC-PR `0.9988`, precision `1.0`, recall `0.9982`.
+
+Đạt một phần:
+- Có threshold selection, nhưng dựa trên F1, chưa dựa trên business cost.
+- Có Random Forest, nhưng chưa có bảng so sánh nhiều classifier.
+
+Chưa đạt:
+- Chưa thấy Logistic Regression.
+- Chưa thấy XGBoost hoặc LightGBM.
+- Chưa có cost-based metric cho missed fraud và false alarms.
+- Chưa có business operating threshold cân bằng giữa customer friction và fraud loss.
+- Chưa có model comparison report.
+
+**Module 6: Model Deployment**
+Trạng thái: Đạt một phần
+
+Đã đạt:
+- Có Streamlit dashboard tại `dashboard/streamlit/app.py`.
+- Docker Compose triển khai Kafka, Spark, Cassandra, Redis, Streamlit, Prometheus, Grafana.
+- Streaming pipeline score giao dịch gần real-time.
+- Dashboard hiển thị alert feed, risk timeline, alert distribution, severity filter, và risk metrics.
+
+Đạt một phần:
+- Streamlit app có thể dùng làm nền cho fraud analyst review queue.
+- Dự án có local deployment khá hoàn chỉnh, nhưng có thể quá nặng so với yêu cầu cloud free-tier của môn học.
+
+Chưa đạt:
+- Không thấy FastAPI hoặc Flask API.
+- Chưa có endpoint `/score` để score một giao dịch đơn lẻ.
+- Chưa có cấu hình deploy đơn giản lên Render/Hugging Face Spaces/Streamlit Cloud.
+- Deployment hiện phụ thuộc Kafka/Spark/Cassandra/Redis, có thể khó chạy trên free tier.
+
+**Module 7: Model Monitoring**
+Trạng thái: Đạt một phần
+
+Đã đạt:
+- Prometheus và Grafana được cấu hình trong `docker-compose.yml`.
+- Có Grafana dashboard tại `monitoring/grafana/provisioning/dashboards/fraud-dashboard.json`.
+- Streaming metrics được ghi vào `metrics_windowed`.
+- Spark streaming tính fraud count/rate theo window.
+
+Đạt một phần:
+- Có operational monitoring.
+- Có monitoring fraud-rate cơ bản.
+
+Chưa đạt:
+- Không thấy Evidently report.
+- Chưa có so sánh data drift giữa incoming data và training distribution.
+- Chưa có rolling precision/recall monitoring dựa trên dữ liệu có label sau deployment.
+- Chưa có định nghĩa retraining trigger.
+- Chưa có monitoring notebook/report khớp với yêu cầu đề bài.
+
+**Module 8: Final Report & Presentation**
+Trạng thái: Chưa đạt
+
+Đã đạt:
+- Có tài liệu kỹ thuật trong `README.md` và `docs/`.
+- Có architecture docs và run guides.
+
+Chưa đạt:
+- Chưa có final Business Analytics report.
+- Chưa có slides.
+- Chưa có khuyến nghị risk-policy như khi nào manual review, khi nào auto-block.
+- Chưa có phần limitations/future improvements theo brief của môn học.
+- Chưa có live/recorded demo link.
+- Chưa có checklist/bộ deliverables hoàn chỉnh.
+
+**Mức Độ Sẵn Sàng Tổng Thể**
+Ước tính mức độ khớp với đề bài: khoảng **50-60%**.
+
+Điểm mạnh:
+- Real-time architecture
+- Streaming fraud detection
+- Dashboard
+- Random Forest model training
+- Imbalance handling
+- Technical documentation
+
+Điểm yếu:
+- Synthetic e-commerce contextual data
+- Data dictionary
+- EDA/reporting theo hướng business
+- Model comparison
+- Cost-based evaluation
+- FastAPI/Flask scoring API
+- Evidently/data drift monitoring
+- Final report và slides
+
+**Các Việc Nên Ưu Tiên**
+1. Thêm synthetic contextual e-commerce fields và document trong `DATA_DICTIONARY.md`.
+2. Mở rộng EDA cho synthetic fields, fraud patterns, imbalance, và business insights.
+3. Thêm tài liệu data cleaning với before/after summary.
+4. Train và so sánh Logistic Regression, Random Forest, và XGBoost/LightGBM.
+5. Thêm cost-based threshold selection.
+6. Thêm FastAPI hoặc Flask endpoint `/score` nhẹ.
+7. Thêm Evidently hoặc report data drift đơn giản kèm retraining triggers.
+8. Tạo final report/slides theo 8 module.
+
+
+Phân chia công việc
+
+Nên chia theo **6 vai trò**, bám sát 8 module của đề bài và tình trạng hiện tại của project.
+
+| Người | Vai trò | Module chính | Trách nhiệm |
+|---|---|---|---|
+| 1 | Business Lead + Report Coordinator | Module 1, 8 | Business problem, KPI, report, slides, policy recommendation |
+| 2 | Data Engineer | Module 1, 3 | Synthetic data, data dictionary, cleaning pipeline |
+| 3 | Data Analyst | Module 2 | EDA, visualization, insight kinh doanh |
+| 4 | Feature Engineer | Module 4 | Feature engineering, encoding, scaling, feature selection |
+| 5 | ML Engineer | Module 5 | Model training, comparison, imbalance handling, threshold |
+| 6 | Deployment + Monitoring Lead | Module 6, 7 | API, Streamlit demo, deployment, monitoring dashboard |
+
+**Người 1: Business Lead + Report Coordinator**
+Phụ trách:
+- Viết business problem: “giao dịch nào có khả năng fraud và nên block/review như thế nào”.
+- Xác định KPI:
+  - Fraud rate
+  - False positive rate
+  - Precision/recall
+  - Financial loss avoided
+  - Cost of false alarm
+  - Manual review rate
+- Viết phần business recommendation:
+  - Giao dịch risk cao: auto-block
+  - Risk trung bình: manual review
+  - Risk thấp: approve
+- Gom nội dung từ các bạn khác để làm final report.
+- Làm slide và chuẩn bị phần thuyết trình.
+
+Deliverables:
+- `Final_Report.pdf`
+- `Presentation.pptx`
+- Business KPI section
+- Risk-policy recommendation section
+
+**Người 2: Data Engineer**
+Phụ trách:
+- Tải và chuẩn bị Kaggle dataset.
+- Tạo synthetic contextual data bằng Python.
+- Các field nên thêm:
+  - `customer_account_age_days`
+  - `device_id`
+  - `browser`
+  - `device_type`
+  - `shipping_billing_mismatch`
+  - `failed_payment_attempts_24h`
+  - `ip_country`
+  - `billing_country`
+  - `ip_billing_country_mismatch`
+  - `hour_of_day`
+  - `is_night_transaction`
+  - `new_device_flag`
+- Viết data dictionary cho tất cả synthetic fields.
+- Làm data cleaning:
+  - Missing values
+  - Duplicates
+  - Invalid categories
+  - Outliers
+  - Before/after comparison
+
+Deliverables:
+- Synthetic data generation script
+- Cleaned dataset
+- `DATA_DICTIONARY.md` hoặc Excel
+- Cleaning summary/report
+
+**Người 3: Data Analyst**
+Phụ trách:
+- Làm EDA đầy đủ.
+- Phân tích:
+  - Fraud rate tổng thể
+  - Fraud rate theo transaction type
+  - Fraud rate theo amount range
+  - Fraud rate theo account age
+  - Fraud rate theo device/browser
+  - Fraud rate theo shipping/billing mismatch
+  - Fraud rate theo failed attempts
+  - Fraud rate theo hour of day
+- Tạo biểu đồ:
+  - Class imbalance chart
+  - Fraud by transaction type
+  - Amount vs fraud
+  - Fraud by hour
+  - Fraud by device/browser
+  - Correlation heatmap
+  - Feature distribution before/after cleaning
+- Viết insight theo hướng business.
+
+Deliverables:
+- EDA notebook hoặc script
+- EDA plots
+- EDA summary section cho report
+
+**Người 4: Feature Engineer**
+Phụ trách:
+- Tạo feature cho model từ dữ liệu gốc và synthetic data.
+- Các feature quan trọng:
+  - `amount_to_balance_ratio`
+  - `sender_depletion_ratio`
+  - `balance_inconsistency`
+  - `velocity_transactions_1h`
+  - `time_since_last_purchase`
+  - `new_device_flag`
+  - `failed_payment_attempts_24h`
+  - `shipping_billing_mismatch`
+  - `ip_billing_country_mismatch`
+  - `is_night_transaction`
+- Encode categorical variables:
+  - `type`
+  - `browser`
+  - `device_type`
+  - `country`
+- Scale numerical features nếu dùng Logistic Regression.
+- Làm feature selection hoặc feature importance.
+
+Deliverables:
+- Feature engineering script
+- Final feature table
+- Feature list
+- Feature importance/selection summary
+
+**Người 5: ML Engineer**
+Phụ trách:
+- Train và compare nhiều model:
+  - Logistic Regression
+  - Random Forest
+  - XGBoost hoặc LightGBM
+- Xử lý class imbalance:
+  - SMOTE
+  - Class weights
+  - Undersampling nếu cần
+- Đánh giá bằng metric phù hợp:
+  - AUC-PR
+  - Precision
+  - Recall
+  - F1
+  - Confusion matrix
+  - False positive rate
+  - False negative rate
+- Làm cost-based evaluation:
+  - Cost của missed fraud
+  - Cost của false alarm
+  - Chọn threshold tối ưu theo business cost
+- Lưu model tốt nhất.
+
+Deliverables:
+- Model comparison table
+- Best model artifact
+- Evaluation plots
+- Cost-based threshold analysis
+- Model development section cho report
+
+**Người 6: Deployment + Monitoring Lead**
+Phụ trách:
+- Làm API scoring giao dịch real-time bằng FastAPI hoặc Flask.
+- Endpoint nên có:
+  - `GET /health`
+  - `POST /score`
+- Làm Streamlit review queue:
+  - Form nhập transaction
+  - Hiển thị fraud probability
+  - Hiển thị risk level
+  - Hiển thị decision: approve/manual review/block
+  - Bảng danh sách giao dịch high-risk
+- Deploy lên cloud free tier:
+  - Streamlit Community Cloud nếu đơn giản
+  - Render nếu dùng FastAPI
+  - Hugging Face Spaces nếu muốn gộp demo
+- Làm monitoring:
+  - Data drift report
+  - Fraud rate over time
+  - Precision/recall rolling window nếu có label
+  - Retraining trigger
+- Có thể dùng Evidently hoặc monitoring dashboard đơn giản bằng Streamlit.
+
+Deliverables:
+- FastAPI/Flask API
+- Streamlit demo
+- Live link
+- Monitoring report/dashboard
+- Deployment guide
+
+**Cách Chia Theo 8 Module**
+| Module | Người phụ trách chính | Người hỗ trợ |
+|---|---|---|
+| 1. Business Understanding & Data Generation | Người 1, Người 2 | Người 3 |
+| 2. EDA | Người 3 | Người 2 |
+| 3. Data Cleaning | Người 2 | Người 3 |
+| 4. Feature Engineering | Người 4 | Người 5 |
+| 5. Model Development | Người 5 | Người 4 |
+| 6. Model Deployment | Người 6 | Người 5 |
+| 7. Model Monitoring | Người 6 | Người 3, Người 5 |
+| 8. Final Report & Presentation | Người 1 | Tất cả |
+
+**Timeline Gợi Ý**
+| Tuần | Công việc chính |
+|---|---|
+| Tuần 1 | Business problem, KPI, tải data, thiết kế synthetic fields |
+| Tuần 2 | Generate synthetic data, data dictionary, cleaning |
+| Tuần 3 | EDA và visualization |
+| Tuần 4 | Feature engineering |
+| Tuần 5 | Train model, compare model, cost-based threshold |
+| Tuần 6 | API + Streamlit demo |
+| Tuần 7 | Monitoring + deployment |
+| Tuần 8 | Final report, slides, rehearsal demo |
+
+**Cách Chia Thuyết Trình**
+Nếu 6 người đều phải nói:
+- Người 1: Business problem, KPI, project overview
+- Người 2: Data sources, synthetic data, data dictionary, cleaning
+- Người 3: EDA insights
+- Người 4: Feature engineering
+- Người 5: Model comparison, evaluation, threshold
+- Người 6: Deployment, monitoring, live demo
+
+**Khuyến nghị**
+Vì project hiện tại đã mạnh ở phần real-time pipeline/deployment, nên nên ưu tiên giao:
+- Người 2 và 3 bổ sung phần data + EDA còn thiếu.
+- Người 5 bổ sung model comparison + cost-based evaluation.
+- Người 6 đơn giản hóa deployment bằng FastAPI/Streamlit để đúng yêu cầu môn học.
+- Người 1 giữ vai trò gom nội dung, tránh project bị quá kỹ thuật mà thiếu business story.
+
