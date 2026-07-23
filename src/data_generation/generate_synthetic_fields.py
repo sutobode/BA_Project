@@ -39,22 +39,35 @@ RISK_PROXY_TYPES = {"TRANSFER", "CASH_OUT"}
 
 
 def compute_risk_proxy(type_: pd.Series, amount: pd.Series, hour_of_day: pd.Series) -> np.ndarray:
-    """Label-free composite risk proxy in [0, 1], built only from observable
-    transaction attributes available at real-time scoring time. Never reads
-    isFraud, and deliberately never reads oldbalanceOrg/newbalanceOrig - those
-    balance columns near-perfectly determine isFraud in PaySim (fraud = drain
-    the account), so using them would leak the target through the back door.
+    """Label-free composite risk proxy in [0, 1]. Never reads isFraud, and
+    deliberately never reads oldbalanceOrg/newbalanceOrig - those balance
+    columns near-perfectly determine isFraud in PaySim (fraud = drain the
+    account), so using them would leak the target through the back door.
+
+    This is an OFFLINE dataset-construction helper, not an inference-time
+    function: it is called once over the full dataset to build the training
+    set, never per-transaction at scoring time.
 
     Components (equal weight, business assumption - not fit to the label):
     - risky_type: TRANSFER/CASH_OUT are the only channels PaySim fraud uses,
       but the vast majority of transactions on these channels are legitimate
       (fraud rate within them is under 1%), so this is a weak channel-risk
-      heuristic, not a near-deterministic proxy.
-    - amount_percentile: rank of amount within its own transaction type -
-      "unusually large for this channel" is a standard real-world fraud
-      heuristic, independent of PaySim's specific balance-draining mechanism.
+      heuristic, not a near-deterministic proxy. Computable per-transaction.
+    - amount_percentile: rank of amount WITHIN its own transaction type,
+      computed across the whole batch. This is a batch/global statistic - to
+      reproduce it for a single new transaction at scoring time you would need
+      the per-type amount distribution persisted from training, not just the
+      transaction itself. "Unusually large for this channel" is a standard
+      real-world fraud heuristic, independent of PaySim's balance mechanism.
     - is_night: transaction occurs in the 00:00-05:59 window - standard
-      time-of-day risk heuristic.
+      time-of-day risk heuristic. Computable per-transaction.
+
+    IMPORTANT (do not over-claim): because risk_score is a function of
+    (type, amount, hour), the conditional fields derived from it carry no
+    predictive information beyond what type/amount/hour already provide. Their
+    fraud association is injected by design, not learned from real behavioral
+    data, and is NOT evidence of real-world predictive power. See the
+    Limitations section of the report/README.
     """
     risky_type = type_.isin(RISK_PROXY_TYPES).astype("float64").to_numpy()
     amount_percentile = amount.groupby(type_).rank(pct=True).astype("float64").to_numpy()
