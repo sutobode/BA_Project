@@ -1,3 +1,20 @@
+"""
+OFFLINE-ONLY MODULE - DO NOT CALL FROM SERVING/SCORING CODE.
+
+Every function in this module is a batch dataset-construction helper, run
+once (or occasionally re-run) to build/enrich the training dataset from the
+raw PaySim CSV. None of it is safe to call from a real-time scoring API:
+- The Bernoulli/Poisson draws below are for SIMULATING plausible historical
+  values so the training set has contextual columns PaySim lacks. At serving
+  time, a real system observes these values directly (real device
+  fingerprint, real IP, real payment-retry count) - it does not re-roll them.
+- amount_percentile (inside compute_risk_proxy) is a statistic fitted against
+  a reference distribution; scoring a single live transaction correctly
+  requires the SAME persisted reference used at training time (see
+  fit_amount_percentile_reference / apply_amount_percentile below), not a
+  fresh in-batch computation.
+"""
+
 import numpy as np
 import pandas as pd
 from faker import Faker
@@ -35,18 +52,159 @@ def generate_device_id(n: int, device_pool: np.ndarray, rng: np.random.Generator
     return rng.choice(device_pool, size=n)
 
 
+def generate_device_id_and_new_device_flag(
+    name_orig: pd.Series,
+    risk_score: np.ndarray,
+    device_pool: np.ndarray,
+    rng: np.random.Generator,
+    base_p: float,
+    high_risk_p: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Joint generation so device_id and new_device_flag stay semantically
+    consistent for accounts (nameOrig) that appear more than once in the
+    dataset (~9.3k rows out of 6.36M - the 0.15% of nameOrig values that
+    repeat, per README section 3). Previously the two fields were generated
+    completely independently: device_id was resampled uniformly from the
+    50,000-device pool on EVERY row regardless of nameOrig, so even when
+    new_device_flag happened to come out False for a repeat account's second
+    transaction (claiming "this is a device already associated with this
+    account"), the independently-resampled device_id almost always differed
+    from the device seen on that account's earlier transaction (~99.998% of
+    the time, since the pool has 50,000 values) - directly contradicting the
+    flag's own meaning.
+
+    Semantics enforced here (repeat accounts only - see below):
+    - new_device_flag is still drawn from the same risk-based
+      Bernoulli(base_p, high_risk_p) as before - the injected fraud signal
+      and its overall population rate are unchanged.
+    - device_id is then made to AGREE with that draw using this account's
+      history so far: True -> sample a device not already in the account's
+      history (and add it); False -> reuse a device already in the
+      account's history.
+    - Edge case: if new_device_flag draws False on the very first
+      transaction seen for an account (no device history exists yet to
+      reuse), it is overridden to True, since "known device" is impossible
+      to satisfy with zero history. This only affects a first-occurrence row
+      that happened to sample False, a rare, narrow correction - not a
+      population-wide behavior change.
+
+    For the ~99.85% of rows whose nameOrig is unique in the dataset, there is
+    no history to be consistent (or inconsistent) with, so both fields keep
+    the original, fully independent, fully vectorized generation: device_id
+    uniform from the pool, new_device_flag from the usual risk-based
+    Bernoulli - unchanged from before this fix.
+
+    Performance: the history-consistency bookkeeping only runs over rows
+    belonging to a repeat-nameOrig account (~9.3k of 6.36M rows) via a
+    Python-level loop - negligible cost relative to the fully vectorized
+    fast path used for the other 99.85% of rows.
+    """
+    n = len(name_orig)
+    risk_score = np.asarray(risk_score, dtype="float64")
+    p_new = base_p + risk_score * (high_risk_p - base_p)
+
+    name_orig_values = name_orig.to_numpy()
+    counts = name_orig.value_counts()
+    repeat_accounts = set(counts[counts > 1].index)
+    is_repeat_row = name_orig.isin(repeat_accounts).to_numpy()
+
+    # Fast path (99.85% of rows): fully independent, exactly as before.
+    device_id = rng.choice(device_pool, size=n)
+    new_device_flag = rng.binomial(1, p_new).astype(bool)
+
+    # Slow-but-tiny path: overwrite only the repeat-account rows with
+    # history-consistent draws, processed in original row order (which
+    # follows step order in the raw PaySim file) so history builds up
+    # causally.
+    # Per-account history: a list (for random.choice-style reuse) plus a set
+    # (for fast "already seen" membership checks) kept in sync together.
+    history: dict = {}
+    for pos in np.where(is_repeat_row)[0]:
+        acc = name_orig_values[pos]
+        entry = history.setdefault(acc, {"devices": [], "seen": set()})
+        known, seen = entry["devices"], entry["seen"]
+        # Pool exhaustion guard: if this account has already accumulated
+        # every device in the pool (only possible with a tiny pool and a very
+        # long history, e.g. a stress test - the real 50,000-device pool
+        # against ~9.3k repeat-account rows never comes close), there is no
+        # genuinely unseen device left to assign. Fall back to reuse rather
+        # than loop forever searching for a nonexistent "new" device.
+        can_be_new = len(seen) < len(device_pool)
+        is_new = can_be_new and (bool(rng.binomial(1, p_new[pos])) or len(known) == 0)
+        if is_new:
+            device = rng.choice(device_pool)
+            while device in seen:
+                device = rng.choice(device_pool)
+            device_id[pos] = device
+            new_device_flag[pos] = True
+            known.append(device)
+            seen.add(device)
+        else:
+            device_id[pos] = known[int(rng.integers(0, len(known)))]
+            new_device_flag[pos] = False
+
+    return device_id, new_device_flag
+
+
 RISK_PROXY_TYPES = {"TRANSFER", "CASH_OUT"}
 
 
-def compute_risk_proxy(type_: pd.Series, amount: pd.Series, hour_of_day: pd.Series) -> np.ndarray:
+def fit_amount_percentile_reference(type_: pd.Series, amount: pd.Series) -> dict[str, np.ndarray]:
+    """FIT step (train-only): for each transaction type, store the sorted
+    array of training-set amounts. This is the reference distribution that
+    apply_amount_percentile() looks values up against.
+
+    Call this ONCE on the training split only. Never re-fit on data that
+    includes validation/test/live rows - doing so lets information about
+    those rows' amounts leak into every training row's percentile (the
+    train/test leakage this pair of functions exists to prevent).
+    """
+    reference: dict[str, np.ndarray] = {}
+    for type_value, group in amount.groupby(type_):
+        reference[str(type_value)] = np.sort(group.to_numpy(dtype="float64"))
+    return reference
+
+
+def apply_amount_percentile(type_: pd.Series, amount: pd.Series, reference: dict[str, np.ndarray]) -> np.ndarray:
+    """TRANSFORM step: percentile rank of each amount within its type,
+    looked up against a reference distribution fitted elsewhere (train-only)
+    via fit_amount_percentile_reference(). This is what makes the statistic
+    reproducible for a single new transaction at scoring time - it only
+    needs the persisted reference array for that type plus its own
+    (type, amount), never the rest of the current batch.
+
+    Unknown types (not present in reference) fall back to percentile 0.5
+    (neutral) rather than raising, since real-time traffic can include a
+    type combination that never appeared in the training split.
+    """
+    out = np.empty(len(amount), dtype="float64")
+    amount_values = amount.to_numpy(dtype="float64")
+    type_values = type_.astype(str).to_numpy()
+    for i in range(len(amount_values)):
+        ref = reference.get(type_values[i])
+        if ref is None or len(ref) == 0:
+            out[i] = 0.5
+        else:
+            # searchsorted gives the count of reference values <= this amount;
+            # dividing by len(ref) gives a percentile rank in [0, 1] without
+            # needing this row's own value to be part of the reference array.
+            out[i] = np.searchsorted(ref, amount_values[i], side="right") / len(ref)
+    return np.clip(out, 0.0, 1.0)
+
+
+def compute_risk_proxy(
+    type_: pd.Series,
+    amount: pd.Series,
+    hour_of_day: pd.Series,
+    amount_percentile_reference: dict[str, np.ndarray] | None = None,
+) -> np.ndarray:
     """Label-free composite risk proxy in [0, 1]. Never reads isFraud, and
     deliberately never reads oldbalanceOrg/newbalanceOrig - those balance
     columns near-perfectly determine isFraud in PaySim (fraud = drain the
     account), so using them would leak the target through the back door.
 
     This is an OFFLINE dataset-construction helper, not an inference-time
-    function: it is called once over the full dataset to build the training
-    set, never per-transaction at scoring time.
+    function - see the module docstring.
 
     Components (equal weight, business assumption - not fit to the label):
     - risky_type: TRANSFER/CASH_OUT are the only channels PaySim fraud uses,
@@ -54,11 +212,14 @@ def compute_risk_proxy(type_: pd.Series, amount: pd.Series, hour_of_day: pd.Seri
       (fraud rate within them is under 1%), so this is a weak channel-risk
       heuristic, not a near-deterministic proxy. Computable per-transaction.
     - amount_percentile: rank of amount WITHIN its own transaction type,
-      computed across the whole batch. This is a batch/global statistic - to
-      reproduce it for a single new transaction at scoring time you would need
-      the per-type amount distribution persisted from training, not just the
-      transaction itself. "Unusually large for this channel" is a standard
-      real-world fraud heuristic, independent of PaySim's balance mechanism.
+      against amount_percentile_reference (fit via
+      fit_amount_percentile_reference() on the TRAIN split only - see that
+      function's docstring). If amount_percentile_reference is None, it is
+      fit on-the-fly from this call's own (type_, amount) - this in-batch
+      fallback is only correct when this call's input IS the full training
+      set with no held-out split; generate_all_synthetic_fields() takes a
+      reference for exactly this reason, so callers who do split their data
+      are not silently exposed to leakage.
     - is_night: transaction occurs in the 00:00-05:59 window - standard
       time-of-day risk heuristic. Computable per-transaction.
 
@@ -70,7 +231,9 @@ def compute_risk_proxy(type_: pd.Series, amount: pd.Series, hour_of_day: pd.Seri
     Limitations section of the report/README.
     """
     risky_type = type_.isin(RISK_PROXY_TYPES).astype("float64").to_numpy()
-    amount_percentile = amount.groupby(type_).rank(pct=True).astype("float64").to_numpy()
+    if amount_percentile_reference is None:
+        amount_percentile_reference = fit_amount_percentile_reference(type_, amount)
+    amount_percentile = apply_amount_percentile(type_, amount, amount_percentile_reference)
     is_night = hour_of_day.between(0, 5).astype("float64").to_numpy()
     return (risky_type + amount_percentile + is_night) / 3.0
 
@@ -171,14 +334,50 @@ OUTPUT_PARQUET_PATH = "data/processed/transactions_synthetic.parquet"
 OUTPUT_SAMPLE_CSV_PATH = "data/processed/transactions_synthetic_sample.csv"
 SAMPLE_SIZE = 5000
 
+DEFAULT_TRAIN_FRACTION = 0.7
 
-def generate_all_synthetic_fields(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+
+def assign_train_test_split(n: int, train_fraction: float = DEFAULT_TRAIN_FRACTION, seed: int = 123) -> np.ndarray:
+    """Row-independent train/test split mask (True = train). Uses its own
+    numpy.random.Generator seeded separately from the field-generation seed,
+    so calling this (or not) never changes the random draws consumed by
+    generate_all_synthetic_fields() for any other field - the split is an
+    orthogonal concern, not entangled with field values.
+
+    This exists so amount_percentile (see fit_amount_percentile_reference)
+    can be fit on the train split only and then reused unchanged for
+    validation/test rows, instead of being fit on the full dataset - fitting
+    any statistic on the full dataset before a train/test split leaks
+    information about test rows into the training data.
+    """
+    rng = np.random.default_rng(seed)
+    return rng.random(n) < train_fraction
+
+
+def generate_all_synthetic_fields(
+    df: pd.DataFrame,
+    seed: int = 42,
+    train_mask: np.ndarray | None = None,
+) -> pd.DataFrame:
     """Label-free: isFraud is never read by any generation function below.
     Every conditional field is driven by compute_risk_proxy(), a composite
     score built only from observable transaction attributes (type, amount,
     hour_of_day) that are available for a brand-new transaction at real-time
     scoring time - see compute_risk_proxy() docstring for why balance columns
-    are deliberately excluded from the proxy."""
+    are deliberately excluded from the proxy.
+
+    train_mask: optional boolean array (same length as df), True for rows
+    that belong to the training split. When provided, the amount_percentile
+    component of compute_risk_proxy is FIT on train_mask rows only (via
+    fit_amount_percentile_reference) and then APPLIED to every row -
+    preventing the train/test leakage that fitting on the full dataset would
+    cause. When omitted (None), the reference is fit on the full input,
+    which is only appropriate when this call's input has no further
+    train/test split downstream (e.g. this dataset-enrichment stage is run
+    before any split, and the split happens later in feature
+    engineering/modeling on the resulting file) - see README for guidance on
+    when to pass train_mask explicitly.
+    """
     rng = np.random.default_rng(seed)
     n = len(df)
     out = df.copy()
@@ -186,15 +385,24 @@ def generate_all_synthetic_fields(df: pd.DataFrame, seed: int = 42) -> pd.DataFr
     out["hour_of_day"] = generate_hour_of_day(df["step"])
     out["is_night_transaction"] = generate_is_night_transaction(out["hour_of_day"])
 
-    risk_score = compute_risk_proxy(df["type"], df["amount"], out["hour_of_day"])
+    if train_mask is not None:
+        amount_percentile_reference = fit_amount_percentile_reference(
+            df.loc[train_mask, "type"], df.loc[train_mask, "amount"]
+        )
+    else:
+        amount_percentile_reference = None
+    risk_score = compute_risk_proxy(
+        df["type"], df["amount"], out["hour_of_day"], amount_percentile_reference=amount_percentile_reference
+    )
 
     out["customer_account_age_days"] = generate_account_age_days(risk_score, rng)
 
     device_pool = build_device_pool(size=DEVICE_POOL_SIZE, seed=seed)
-    out["device_id"] = generate_device_id(n, device_pool, rng)
+    out["device_id"], out["new_device_flag"] = generate_device_id_and_new_device_flag(
+        df["nameOrig"], risk_score, device_pool, rng, NEW_DEVICE_FLAG_BASE_P, NEW_DEVICE_FLAG_HIGH_RISK_P
+    )
     out["browser"] = generate_categorical(n, BROWSER_WEIGHTS, rng)
     out["device_type"] = generate_categorical(n, DEVICE_TYPE_WEIGHTS, rng)
-    out["new_device_flag"] = generate_new_device_flag(risk_score, rng)
 
     out["billing_country"] = generate_billing_country(n, rng)
     out["ip_country"] = generate_ip_country(out["billing_country"].to_numpy(), risk_score, rng)
@@ -246,7 +454,12 @@ def build_stratified_sample(df: pd.DataFrame, sample_size: int = SAMPLE_SIZE, se
 
 def main():
     df = load_raw_transactions()
-    result = generate_all_synthetic_fields(df, seed=42)
+    # Fit amount_percentile on a train split, not the full dataset, so this
+    # enrichment stage itself doesn't leak test-row amounts into the
+    # reference distribution used to score every row - see
+    # fit_amount_percentile_reference() and assign_train_test_split().
+    train_mask = assign_train_test_split(len(df))
+    result = generate_all_synthetic_fields(df, seed=42, train_mask=train_mask)
     Path(OUTPUT_PARQUET_PATH).parent.mkdir(parents=True, exist_ok=True)
     result.to_parquet(OUTPUT_PARQUET_PATH, index=False)
     sample = build_stratified_sample(result, sample_size=SAMPLE_SIZE, seed=42)

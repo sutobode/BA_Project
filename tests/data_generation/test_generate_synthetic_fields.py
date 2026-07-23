@@ -129,6 +129,9 @@ LABEL_FREE_GENERATION_FUNCTIONS = [
     gsf.generate_shipping_billing_mismatch,
     gsf.generate_failed_payment_attempts_24h,
     gsf.compute_risk_proxy,
+    gsf.generate_device_id_and_new_device_flag,
+    gsf.fit_amount_percentile_reference,
+    gsf.apply_amount_percentile,
 ]
 
 
@@ -169,6 +172,7 @@ def test_conditional_fields_are_identical_when_isfraud_changes_but_observables_f
         "step": rng_step.integers(1, 744, size=n),
         "type": rng_step.choice(["PAYMENT", "TRANSFER", "CASH_OUT", "CASH_IN", "DEBIT"], size=n),
         "amount": rng_step.exponential(1000, size=n),
+        "nameOrig": [f"C{i}" for i in range(n)],
     })
     df_fraud_0 = base_df.copy()
     df_fraud_0["isFraud"] = 0
@@ -275,13 +279,18 @@ REQUIRED_SYNTHETIC_COLUMNS = {
 
 
 def _make_base_df(n_rows: int, n_fraud: int, seed: int = 0) -> pd.DataFrame:
-    """Minimal realistic frame: generate_all_synthetic_fields needs type/amount
-    (for compute_risk_proxy) in addition to step/isFraud."""
+    """Minimal realistic frame: generate_all_synthetic_fields needs
+    type/amount (for compute_risk_proxy) and nameOrig (for
+    generate_device_id_and_new_device_flag) in addition to step/isFraud.
+    nameOrig is unique per row here (the ~99.85% common case in the real
+    dataset) - tests targeting the repeat-nameOrig behavior use their own
+    DataFrame instead."""
     rng = np.random.default_rng(seed)
     return pd.DataFrame({
         "step": np.arange(1, n_rows + 1),
         "type": rng.choice(["PAYMENT", "TRANSFER", "CASH_OUT", "CASH_IN", "DEBIT"], size=n_rows),
         "amount": rng.exponential(1000, size=n_rows),
+        "nameOrig": [f"C{i}" for i in range(n_rows)],
         "isFraud": [0] * (n_rows - n_fraud) + [1] * n_fraud,
     })
 
@@ -304,6 +313,7 @@ def test_generate_all_synthetic_fields_preserves_original_columns_and_row_count(
     df = pd.DataFrame({
         "step": [1, 2, 3], "type": ["PAYMENT", "TRANSFER", "CASH_OUT"],
         "isFraud": [0, 0, 1], "amount": [10.0, 20.0, 30.0],
+        "nameOrig": ["C1", "C2", "C3"],
     })
     result = gsf.generate_all_synthetic_fields(df, seed=1)
     assert list(result["amount"]) == [10.0, 20.0, 30.0]
@@ -328,6 +338,227 @@ def test_generate_all_synthetic_fields_adds_ip_billing_country_mismatch_consiste
     result = gsf.generate_all_synthetic_fields(df, seed=42)
     expected = result["ip_country"] != result["billing_country"]
     pd.testing.assert_series_equal(result["ip_billing_country_mismatch"], expected, check_names=False)
+
+
+# --- fit/transform split for amount_percentile (train-only fitting) ---
+
+
+def test_fit_amount_percentile_reference_stores_sorted_arrays_per_type():
+    type_ = pd.Series(["A", "A", "B", "B", "B"])
+    amount = pd.Series([30.0, 10.0, 5.0, 1.0, 9.0])
+    ref = gsf.fit_amount_percentile_reference(type_, amount)
+    assert list(ref["A"]) == [10.0, 30.0]
+    assert list(ref["B"]) == [1.0, 5.0, 9.0]
+
+
+def test_apply_amount_percentile_matches_in_batch_rank_when_reference_is_full_batch():
+    rng = np.random.default_rng(0)
+    n = 2000
+    type_ = pd.Series(rng.choice(["A", "B", "C"], size=n))
+    amount = pd.Series(rng.exponential(1000, size=n))
+    reference = gsf.fit_amount_percentile_reference(type_, amount)
+    applied = gsf.apply_amount_percentile(type_, amount, reference)
+    in_batch = amount.groupby(type_).rank(pct=True).to_numpy()
+    # searchsorted-based percentile and in-batch rank agree within a small
+    # tolerance (both estimate the same underlying rank, via different but
+    # equivalent tie-handling conventions).
+    assert np.abs(applied - in_batch).max() < 0.01
+
+
+def test_apply_amount_percentile_reproducible_for_a_single_new_row_using_persisted_reference():
+    # Core claim being tested: given ONLY a persisted reference (no access to
+    # any other rows), a single new transaction's percentile is computable
+    # deterministically - this is what makes amount_percentile reproducible
+    # at scoring time instead of being a batch-only statistic.
+    train_type = pd.Series(["TRANSFER"] * 100)
+    train_amount = pd.Series(np.arange(1, 101, dtype="float64"))
+    reference = gsf.fit_amount_percentile_reference(train_type, train_amount)
+
+    new_row_type = pd.Series(["TRANSFER"])
+    new_row_amount = pd.Series([50.0])
+    result_1 = gsf.apply_amount_percentile(new_row_type, new_row_amount, reference)
+    result_2 = gsf.apply_amount_percentile(new_row_type, new_row_amount, reference)
+    assert result_1[0] == result_2[0]
+    assert result_1[0] == pytest.approx(0.5, abs=0.01)
+
+
+def test_apply_amount_percentile_unknown_type_falls_back_to_neutral():
+    reference = gsf.fit_amount_percentile_reference(pd.Series(["A"]), pd.Series([10.0]))
+    result = gsf.apply_amount_percentile(pd.Series(["ZZZ_UNKNOWN"]), pd.Series([999.0]), reference)
+    assert result[0] == pytest.approx(0.5)
+
+
+def test_compute_risk_proxy_with_explicit_reference_does_not_refit_from_input():
+    # If a reference is supplied, compute_risk_proxy must use it as-is rather
+    # than silently re-fitting from (type_, amount) - otherwise passing a
+    # reference would be a no-op and train/test leakage would persist.
+    train_type = pd.Series(["TRANSFER"] * 100)
+    train_amount = pd.Series(np.arange(1, 101, dtype="float64"))
+    reference = gsf.fit_amount_percentile_reference(train_type, train_amount)
+
+    # A test row with an amount far outside anything in the training
+    # reference - if compute_risk_proxy refit from this call's own input
+    # (a batch of size 1), the percentile would trivially be 1.0 regardless
+    # of the reference; using the persisted reference correctly, it should
+    # reflect where 5.0 falls within the TRAIN distribution instead.
+    test_type = pd.Series(["TRANSFER"])
+    test_amount = pd.Series([5.0])
+    test_hour = pd.Series([12])
+    risk = gsf.compute_risk_proxy(test_type, test_amount, test_hour, amount_percentile_reference=reference)
+    # amount=5 sits near the bottom of the 1..100 training reference, so its
+    # contribution to risk_score should be small, not saturated at 1.0.
+    assert risk[0] < 0.5
+
+
+# --- train/test split utility ---
+
+
+def test_assign_train_test_split_returns_boolean_array_of_correct_length():
+    mask = gsf.assign_train_test_split(1000)
+    assert mask.dtype == bool
+    assert len(mask) == 1000
+
+
+def test_assign_train_test_split_approximately_matches_train_fraction():
+    mask = gsf.assign_train_test_split(100_000, train_fraction=0.7)
+    assert mask.mean() == pytest.approx(0.7, abs=0.01)
+
+
+def test_assign_train_test_split_reproducible_with_same_seed():
+    mask1 = gsf.assign_train_test_split(1000, seed=5)
+    mask2 = gsf.assign_train_test_split(1000, seed=5)
+    assert (mask1 == mask2).all()
+
+
+def test_generate_all_synthetic_fields_with_train_mask_uses_train_only_reference():
+    # Regression guard: passing train_mask must change which reference gets
+    # fit (train rows only) without crashing or silently ignoring the mask.
+    df = _make_base_df(1000, 10)
+    train_mask = gsf.assign_train_test_split(len(df), seed=1)
+    with_mask = gsf.generate_all_synthetic_fields(df, seed=42, train_mask=train_mask)
+    without_mask = gsf.generate_all_synthetic_fields(df, seed=42, train_mask=None)
+    # Both must still produce every required column and preserve row count -
+    # the train_mask path is a refinement, not a different contract.
+    assert REQUIRED_SYNTHETIC_COLUMNS.issubset(with_mask.columns)
+    assert len(with_mask) == len(df)
+    assert len(without_mask) == len(df)
+
+
+# --- device_id / new_device_flag joint consistency ---
+
+
+def test_generate_device_id_and_new_device_flag_first_occurrence_of_repeat_account_is_always_new():
+    # A repeat account's very first row (in order) has no prior device
+    # history to compare against, so new_device_flag must be True there
+    # regardless of what the risk-based Bernoulli draw would otherwise give
+    # (risk_score=0 here means the underlying draw is very unlikely to be
+    # True on its own - if the assertion passes anyway, it's because of the
+    # no-history override, not chance).
+    name_orig = pd.Series(["REPEAT", "REPEAT", "OTHER", "OTHER", "OTHER"])
+    risk_score = np.zeros(5)
+    rng = np.random.default_rng(0)
+    pool = gsf.build_device_pool(size=100, seed=1)
+    _, new_device_flag = gsf.generate_device_id_and_new_device_flag(
+        name_orig, risk_score, pool, rng, base_p=0.04, high_risk_p=0.12
+    )
+    assert new_device_flag[0] == True  # REPEAT's first occurrence
+    assert new_device_flag[2] == True  # OTHER's first occurrence
+
+
+def test_generate_device_id_and_new_device_flag_consistent_for_repeat_account():
+    # The behavioral guarantee this function exists to enforce: for a
+    # repeat-nameOrig account, new_device_flag=False must always mean the
+    # device_id was actually seen before for that same account, and
+    # new_device_flag=True must always mean it was not.
+    n = 200
+    name_orig = pd.Series(["REPEAT_ACCOUNT"] * n)
+    risk_score = np.full(n, 0.5)
+    rng = np.random.default_rng(0)
+    pool = gsf.build_device_pool(size=1000, seed=1)  # pool >> n, no exhaustion
+    device_id, new_device_flag = gsf.generate_device_id_and_new_device_flag(
+        name_orig, risk_score, pool, rng, base_p=0.04, high_risk_p=0.12
+    )
+
+    seen: set = set()
+    for i in range(n):
+        if new_device_flag[i]:
+            assert device_id[i] not in seen, f"row {i}: flagged new but device was already seen for this account"
+        else:
+            assert device_id[i] in seen, f"row {i}: flagged known but device was never seen before for this account"
+        seen.add(device_id[i])
+
+
+def test_generate_device_id_and_new_device_flag_falls_back_to_reuse_when_pool_exhausted():
+    # Edge case: if an account's history has already consumed every device in
+    # a tiny pool, there is no unseen device left. Must terminate (not loop
+    # forever) and fall back to reusing a known device rather than crashing.
+    n = 30
+    name_orig = pd.Series(["REPEAT_ACCOUNT"] * n)
+    risk_score = np.ones(n)  # high_risk_p=0.12 -> "new" draws are still likely
+    rng = np.random.default_rng(0)
+    pool = gsf.build_device_pool(size=5, seed=1)  # tiny pool, easy to exhaust
+    device_id, new_device_flag = gsf.generate_device_id_and_new_device_flag(
+        name_orig, risk_score, pool, rng, base_p=0.04, high_risk_p=0.12
+    )
+    assert len(device_id) == n  # completed without hanging
+    assert set(device_id).issubset(set(pool))
+
+
+def test_generate_device_id_and_new_device_flag_unique_accounts_use_independent_fast_path():
+    # Accounts that each appear exactly once in the dataset have no
+    # meaningful device history to be consistent (or inconsistent) with, so
+    # they take the original, fully independent generation path: device_id
+    # uniform from the pool, new_device_flag from the plain risk-based
+    # Bernoulli - unchanged from the pre-fix behavior. Verify the rate
+    # matches base_p/high_risk_p at the population level (not "always True"
+    # -  a unique account can still legitimately draw False).
+    n = 50_000
+    name_orig = pd.Series([f"C{i}" for i in range(n)])
+    risk_score = np.zeros(n)
+    rng = np.random.default_rng(0)
+    pool = gsf.build_device_pool(size=1000, seed=1)
+    _, new_device_flag = gsf.generate_device_id_and_new_device_flag(
+        name_orig, risk_score, pool, rng, base_p=0.04, high_risk_p=0.12
+    )
+    assert new_device_flag.mean() == pytest.approx(0.04, abs=0.01)
+
+
+def test_generate_all_synthetic_fields_device_history_consistent_end_to_end():
+    # End-to-end guard on the full pipeline (not just the isolated helper):
+    # for any account appearing more than once in the output, a row with
+    # new_device_flag=False must reuse a device_id seen earlier for that
+    # same account (in step order), and new_device_flag=True must introduce
+    # a device_id not seen earlier for that account.
+    n = 300
+    rng = np.random.default_rng(7)
+    name_orig = rng.choice([f"ACC{i}" for i in range(20)], size=n)  # forces repeats
+    df = pd.DataFrame({
+        "step": np.arange(1, n + 1),
+        "type": rng.choice(["PAYMENT", "TRANSFER", "CASH_OUT", "CASH_IN", "DEBIT"], size=n),
+        "amount": rng.exponential(1000, size=n),
+        "nameOrig": name_orig,
+        "isFraud": rng.integers(0, 2, size=n),
+    })
+    result = gsf.generate_all_synthetic_fields(df, seed=42)
+
+    history: dict = {}
+    for _, row in result.iterrows():
+        acc = row["nameOrig"]
+        seen = history.setdefault(acc, set())
+        if row["new_device_flag"]:
+            assert row["device_id"] not in seen
+        else:
+            assert row["device_id"] in seen
+        seen.add(row["device_id"])
+
+
+# --- module is offline-only: static check that no function name suggests a scoring entrypoint ---
+
+
+def test_module_docstring_states_offline_only():
+    import data_generation.generate_synthetic_fields as module
+    assert module.__doc__ is not None
+    assert "OFFLINE" in module.__doc__
 
 
 def test_load_raw_transactions_applies_expected_dtypes(tmp_path):

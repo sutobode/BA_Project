@@ -171,10 +171,10 @@ flowchart TD
 | 1 | `hour_of_day` | derived | `(step - 1) % 24` | Suy trực tiếp từ `step`, không cần giả định |
 | 2 | `is_night_transaction` | derived | `hour_of_day ∈ [0,5]` | Định nghĩa "đêm" = 0h–6h, quy ước phổ biến trong nghiên cứu fraud theo giờ |
 | 3 | `customer_account_age_days` | conditional-on-risk-proxy (lognormal) | median 400 → 275 ngày | Tài khoản bị chiếm đoạt/mule thường tạo gần đây hơn — hệ số thận trọng, là business assumption, không suy từ số liệu thực |
-| 4 | `device_id` | độc lập | pool cố định 50.000 UUID (Faker) | Không tự thân là tín hiệu fraud; tín hiệu nằm ở `new_device_flag` (#7), tránh trùng lặp thông tin |
+| 4 | `device_id` | joint với #7 (xem mục 7b) | pool cố định 50.000 UUID (Faker) | Với 99,85% account xuất hiện đúng 1 lần: độc lập, như trước. Với account lặp lại (~9.298 account, xem mục 7b): sinh cùng lúc với #7 để nhất quán lịch sử thiết bị của account đó |
 | 5 | `browser` | độc lập | Chrome 55% / Safari 20% / Edge 12% / Firefox 8% / Other 5% | Không có cơ sở hành vi để gắn với fraud — cố ý trung lập, tránh over-signal giả tạo |
 | 6 | `device_type` | độc lập | mobile 65% / desktop 30% / tablet 5% | Tương tự #5 |
-| 7 | `new_device_flag` | conditional-on-risk-proxy (Bernoulli) | p = 0.04 → 0.12 (3x) | ~4% giao dịch hợp pháp từ thiết bị mới là hợp lý; risk cao tăng gấp 3 vì account-takeover thường từ thiết bị lạ, nhưng không tuyệt đối |
+| 7 | `new_device_flag` | conditional-on-risk-proxy (Bernoulli), joint với #4 | p = 0.04 → 0.12 (3x) | ~4% giao dịch hợp pháp từ thiết bị mới là hợp lý; risk cao tăng gấp 3 vì account-takeover thường từ thiết bị lạ, nhưng không tuyệt đối. Với account lặp lại: `True` chỉ khi `device_id` thực sự chưa từng gắn với account đó — xem mục 7b |
 | 8 | `billing_country` | độc lập | categorical, 20 quốc gia | Mô phỏng cơ cấu khách hàng nền tảng; tín hiệu nằm ở mismatch (#9, #10a), không phải ở đây |
 | 9 | `ip_country` | conditional-on-risk-proxy | match rate 0.93 → 0.80 | Giao dịch hợp pháp đa số dùng IP đúng quốc gia; risk cao lệch nhiều hơn nhưng vẫn phần lớn trùng (VPN/proxy giúp fraud giả mạo IP) |
 | 10 | `ip_billing_distance_km` | **derived** từ #8, #9 | Haversine formula (xem giải thích dưới bảng) | Tính trực tiếp bằng bảng tọa độ cố định — đảm bảo nhất quán nội tại, không mâu thuẫn với mismatch flag |
@@ -229,6 +229,67 @@ ip_country[i] = billing_country[i] nếu Bernoulli(match_p[i]) = 1,
 
 **Vì sao chọn nội suy tuyến tính (linear interpolation) chứ không phải if/else 2 giá trị:** `risk_score` là số liên tục trong [0,1], không phải nhị phân — nếu chỉ có 2 mức "thấp/cao" như thiết kế label-conditional cũ (`if is_fraud: ... else: ...`), sẽ mất hết thông tin về *mức độ* rủi ro (giao dịch rủi ro trung bình sẽ bị xử lý giống hệt giao dịch rủi ro cao nhất). Nội suy tuyến tính giữ được gradient này, đúng bản chất "risk score" hơn là "risk label".
 
+## 7b. Tính nhất quán `device_id` ↔ `new_device_flag` cho account lặp lại
+
+**Vấn đề đã sửa:** thiết kế ban đầu sinh `device_id` (chọn ngẫu nhiên từ pool 50.000 UUID) và `new_device_flag` (Bernoulli theo `risk_score`) **hoàn toàn độc lập với nhau**. Với 99,85% giao dịch (account chỉ xuất hiện 1 lần — mục 3), điều này không sao vì không có "lịch sử thiết bị" nào để so sánh. Nhưng với ~9.298 account lặp lại (0,15%, tổng ~18.611 dòng), độc lập hoàn toàn tạo ra mâu thuẫn logic: `new_device_flag=False` ("thiết bị đã biết") nhưng `device_id` được resample ngẫu nhiên từ pool 50.000 → xác suất trùng đúng thiết bị đã dùng trước đó cho account này chỉ ~1/50.000 — tức **gần như luôn mâu thuẫn với chính ý nghĩa của flag**.
+
+**Cách sửa — `generate_device_id_and_new_device_flag()` sinh đồng thời (joint), theo lịch sử từng account:**
+
+```
+Với mỗi account (nameOrig), xử lý các giao dịch theo đúng thứ tự step:
+
+  Giao dịch ĐẦU TIÊN của account này:
+    new_device_flag = True   (bắt buộc — chưa có lịch sử để so sánh)
+    device_id = 1 thiết bị ngẫu nhiên từ pool  → thêm vào lịch sử account
+
+  Giao dịch TIẾP THEO (account đã có lịch sử):
+    new_device_flag ~ Bernoulli(base_p + risk_score × (high_risk_p − base_p))   [không đổi công thức]
+    NẾU new_device_flag = True:
+        device_id = 1 thiết bị CHƯA từng xuất hiện trong lịch sử account này
+    NẾU new_device_flag = False:
+        device_id = 1 thiết bị ĐÃ có trong lịch sử account này (chọn lại)
+    → thêm device_id mới (nếu có) vào lịch sử account
+```
+
+**Với account chỉ xuất hiện 1 lần (99,85%):** không có lịch sử để so sánh, nên giữ đúng hành vi cũ — `device_id` độc lập từ pool, `new_device_flag` từ Bernoulli thông thường (không ép `True`, vì với 1 giao dịch duy nhất, không có "mâu thuẫn" nào có thể xảy ra).
+
+**Đảm bảo kỹ thuật (đã test + verify trên data thật):** chạy trên toàn bộ `transactions_cleaned.parquet` — 9.298 account lặp lại, 18.611 dòng thuộc các account đó — **0 vi phạm tính nhất quán** (`new_device_flag=True` ⟺ `device_id` chưa từng thấy ở account đó; `False` ⟺ đã thấy). Có edge-case guard chống vòng lặp vô hạn nếu 1 account (giả định) đã dùng hết cả pool 50.000 thiết bị (không xảy ra trong data thật, chỉ có thể xảy ra nếu test dùng pool nhân tạo rất nhỏ).
+
+**Hiệu năng:** chỉ 18.611 dòng (0,29% dữ liệu) chạy qua vòng lặp Python có lịch sử — không đáng kể so với 6.362.620 dòng còn lại vẫn 100% vectorized như cũ.
+
+## 7c. Amount-percentile: fit trên train, không fit trên toàn bộ dataset
+
+**Vấn đề đã sửa:** `amount_percentile` (1 trong 3 thành phần của `compute_risk_proxy`, mục 7) ban đầu tính bằng `amount.groupby(type).rank(pct=True)` — **rank ngay trong batch đang xử lý**. Nếu batch đó sau này bị chia train/test để train model, thứ hạng percentile của **mọi dòng training** đã bị ảnh hưởng bởi amount của **các dòng sẽ thành test** (vì rank tính trên toàn bộ batch trước khi chia) — đây là 1 dạng train/test leakage: thông tin từ tập test "rò" ngược vào feature của tập train.
+
+**Cách sửa — tách rõ 2 bước fit/transform:**
+
+```
+fit_amount_percentile_reference(type, amount)   # BƯỚC FIT — chỉ gọi trên TRAIN split
+    → với mỗi type, lưu lại toàn bộ amount (đã sort) của CÁC DÒNG TRAIN
+
+apply_amount_percentile(type, amount, reference) # BƯỚC TRANSFORM — gọi cho MỌI dòng (train/test/mới)
+    → percentile[i] = (số giá trị trong reference[type[i]] ≤ amount[i]) / |reference[type[i]]|
+    → dùng np.searchsorted(reference_sorted, amount[i]) — không cần đọc dòng nào khác trong batch hiện tại
+```
+
+`compute_risk_proxy(..., amount_percentile_reference=...)` nhận reference này làm tham số optional. `assign_train_test_split(n, train_fraction=0.7, seed=123)` — utility tách mask train/test, dùng **RNG riêng** (không ảnh hưởng đến các field khác vì mọi random khác vẫn dùng đúng `numpy.random.Generator(seed=42)` như cũ). Pipeline build dataset thật (`main()`) giờ luôn tách 70% train trước khi fit reference:
+
+```
+train_mask = assign_train_test_split(n)                    # 70% train, seed=123
+result = generate_all_synthetic_fields(df, train_mask=train_mask)
+```
+
+**Hệ quả quan trọng — reproducible cho 1 giao dịch mới:** vì `apply_amount_percentile` chỉ cần `reference` (đã lưu từ lúc fit) + `(type, amount)` của **đúng dòng đó**, không cần đọc dòng nào khác — đây chính là điều làm `amount_percentile` **tính lại được đúng** cho 1 giao dịch mới lúc scoring, miễn là hệ thống serving lưu lại `reference` từ lúc train (không phải tính lại từ đầu trên batch hiện tại).
+
+**`check_leakage.py` cũng đổi theo:** `check_all_fields()` nhận `row_mask` optional, và `main()` chạy check **chỉ trên train split** — nhất quán với việc `amount_percentile_reference` chỉ fit trên train. Đây là lý do số liệu AUC ở mục 9 dưới đây đo trên **70% dữ liệu (train split)**, không phải toàn bộ 6.362.620 dòng như các phiên bản trước.
+
+## 7d. Ràng buộc offline-only
+
+Toàn bộ module `generate_synthetic_fields.py` giờ có **module-level docstring** ghi rõ: đây là công cụ xây dựng dataset ở dạng batch, **không được gọi từ code serving/scoring**. Lý do kỹ thuật cụ thể (không chỉ là lời khuyên):
+- Các hàm sinh field (Bernoulli/Poisson/Lognormal) **mô phỏng** giá trị lịch sử hợp lý để bù cho việc PaySim thiếu field bối cảnh — hệ thống thật **quan sát trực tiếp** các giá trị này (device fingerprint thật, IP thật, số lần thất bại thật), không "tung xúc xắc" lại.
+- `amount_percentile` cần đúng `reference` đã fit từ training (mục 7c) — không tự tính lại đúng nếu chỉ có 1 giao dịch đơn lẻ mà không có reference đã lưu.
+- `generate_device_id_and_new_device_flag` cần lịch sử thiết bị **đầy đủ, đúng thứ tự thời gian** của account đó (mục 7b) — hệ thống serving thật sẽ lưu lịch sử này trong database, không tính lại từ đầu mỗi lần.
+
 ## 7a. Nền tảng thuật toán — các phân phối xác suất dùng để sinh field
 
 Phần này giải thích **từ số 0** ý nghĩa của 3 phân phối xác suất dùng trong mục 7, cho người chưa quen thống kê. Nếu đã quen, có thể bỏ qua và đi thẳng mục 8.
@@ -278,6 +339,11 @@ sequenceDiagram
     Check->>Dev: Phát hiện công thức gốc bị lệch dương với field cardinality lớn<br/>(device_id: có thể FAIL giả ~0.48 trên mẫu nhỏ dù độc lập hoàn toàn với fraud)
     Dev->>Check: Thay bằng Cramér's V hiệu chỉnh bias (Bergsma, 2013)
     Check->>Dev: device_id: 0.0, vẫn PASS, ổn định hơn theo sample size
+
+    Dev->>Check: Review kỹ thuật thứ 4 — kiểm tra train/test hygiene và semantic consistency
+    Check->>Dev: (a) amount_percentile fit ngay trên batch đang xử lý -> leak train/test<br/>nếu batch bị chia sau đó; (b) device_id/new_device_flag sinh độc lập -><br/>mâu thuẫn logic trên account lặp lại (~9.298 account, 18.611 dòng)
+    Dev->>Check: Tách fit_amount_percentile_reference (chỉ train) / apply_amount_percentile<br/>(mọi dòng); viết generate_device_id_and_new_device_flag joint theo lịch sử account
+    Check->>Dev: Sinh lại trên data thật -> 13/13 PASS (đo trên train split 70%),<br/>0 vi phạm consistency trên 18.611 dòng account lặp lại (mục 7b, 7c)
 ```
 
 **Bài học rút ra:** nếu `check_leakage` báo FAIL, đó là quy trình đang hoạt động đúng — không phải bug (xem mục 18 để biết cách xử lý). Cramér's V dùng công thức **hiệu chỉnh bias** vì field cardinality lớn (`device_id`, 50.000 giá trị) bị lệch dương với công thức gốc, đặc biệt nhạy với kích thước dataset.
@@ -286,25 +352,27 @@ sequenceDiagram
 
 Row count và tỷ lệ fraud giữ nguyên (0,1291%) so với file gốc — bước sinh dữ liệu **không làm thay đổi class imbalance**. Xử lý imbalance kỹ thuật (SMOTE, class weight...) không thuộc phạm vi phần này, để lại cho bước feature engineering/modeling phía sau.
 
-| Field | Metric | Giá trị đo được | Kết quả |
+**Quan trọng — số liệu dưới đây đo trên TRAIN SPLIT (70% dữ liệu, ~4.454.000 dòng), không phải toàn bộ 6.362.620 dòng.** Đây là thay đổi có chủ đích (mục 7c): dùng đúng cùng tập dữ liệu mà `amount_percentile_reference` được fit trên, để quyết định "field này leak hay không" không bị ảnh hưởng bởi nhãn của các dòng sẽ nằm trong test split.
+
+| Field | Metric | Giá trị đo được (train split) | Kết quả |
 |---|---|---|---|
-| `hour_of_day` | AUC | 0.6336 | PASS |
-| `is_night_transaction` | AUC | 0.6217 | PASS |
-| `customer_account_age_days` | AUC | 0.5508 | PASS |
+| `hour_of_day` | AUC | 0.6311 | PASS |
+| `is_night_transaction` | AUC | 0.6193 | PASS |
+| `customer_account_age_days` | AUC | 0.5557 | PASS |
 | `device_id` | Cramér's V (hiệu chỉnh bias) | 0.0 | PASS |
 | `browser` | Cramér's V (hiệu chỉnh bias) | 0.0 | PASS |
-| `device_type` | Cramér's V (hiệu chỉnh bias) | 0.0004 | PASS |
-| `new_device_flag` | AUC | 0.5137 | PASS |
-| `billing_country` | Cramér's V (hiệu chỉnh bias) | 0.0 | PASS |
-| `ip_country` | Cramér's V (hiệu chỉnh bias) | 0.0018 | PASS |
-| `ip_billing_distance_km` | AUC | 0.5208 | PASS |
-| `ip_billing_country_mismatch` | Cramér's V (hiệu chỉnh bias) | 0.0047 | PASS |
-| `shipping_billing_mismatch` | AUC | 0.5154 | PASS |
-| `failed_payment_attempts_24h` | AUC | 0.5533 | PASS |
+| `device_type` | Cramér's V (hiệu chỉnh bias) | 0.0 | PASS |
+| `new_device_flag` | AUC | 0.5099 | PASS |
+| `billing_country` | Cramér's V (hiệu chỉnh bias) | 0.0009 | PASS |
+| `ip_country` | Cramér's V (hiệu chỉnh bias) | 0.0011 | PASS |
+| `ip_billing_distance_km` | AUC | 0.5180 | PASS |
+| `ip_billing_country_mismatch` | Cramér's V (hiệu chỉnh bias) | 0.0041 | PASS |
+| `shipping_billing_mismatch` | AUC | 0.5178 | PASS |
+| `failed_payment_attempts_24h` | AUC | 0.5503 | PASS |
 
-**Nhận xét quan trọng:** so với thiết kế label-conditional cũ, AUC của 5 field đã đổi cơ chế **giảm** (ví dụ `customer_account_age_days`: 0.6689 → 0.5508). Đây là kết quả **đúng như kỳ vọng, không phải suy giảm chất lượng** — risk proxy label-free có tương quan yếu hơn với `isFraud` vì không còn đọc trực tiếp nhãn, xác nhận cơ chế mới không leak qua cửa sau qua các cột observable.
+**Nhận xét:** so với thiết kế label-conditional cũ (đo trên toàn bộ dataset), AUC của 5 field điều kiện vẫn ở vùng thấp tương tự (0.51–0.56) — chuyển sang đo trên train-split không làm đổi kết luận PASS/FAIL, chỉ làm số liệu chính xác hơn về mặt phương pháp (không lẫn thông tin từ dòng sẽ thành test).
 
-Số liệu đầy đủ kèm data type, unit, formula, business assumption: [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) (sinh tự động từ code).
+Số liệu đầy đủ kèm data type, unit, formula, business assumption: [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) (sinh tự động từ code, luôn khớp lần chạy `check_leakage.py` gần nhất trên train split).
 
 ## 9a. Đối chiếu trực tiếp với đề bài (`yeucau.txt`)
 
@@ -538,11 +606,11 @@ src/data_generation/
 src/data_cleaning/
   clean_transactions.py         # 6 hàm check/flag + orchestrator clean_dataset() + CLI
   cleaning_report.py            # build_cleaning_report_markdown() + CLI ghi docs/CLEANING_REPORT.md
-tests/data_generation/          # 64 unit test
+tests/data_generation/          # 82 unit test
 tests/data_cleaning/            # 18 unit test
 ```
 
-82 test tổng cộng: đúng tỷ lệ base/high-risk theo từng công thức, tái lập được (reproducibility), không tràn kiểu dữ liệu, bất biến toán học kiểm tra exhaustive, schema guard khi đọc CSV, **static check xác nhận không hàm sinh nào nhận `isFraud` làm tham số**, **test hành vi xác nhận đổi `isFraud` giữ observable cố định thì output không đổi**, và với module cleaning: đúng số dòng xoá/flag theo từng kịch bản, không đụng đến dòng không liên quan.
+100 test tổng cộng: đúng tỷ lệ base/high-risk theo từng công thức, tái lập được (reproducibility), không tràn kiểu dữ liệu, bất biến toán học kiểm tra exhaustive, schema guard khi đọc CSV, **static check xác nhận không hàm sinh nào nhận `isFraud` làm tham số**, **test hành vi xác nhận đổi `isFraud` giữ observable cố định thì output không đổi**, **test fit/transform của `amount_percentile` reproducible cho 1 dòng mới dùng reference đã lưu (mục 7c)**, **test tính nhất quán `device_id`/`new_device_flag` cho account lặp lại, kể cả edge-case pool bị dùng hết (mục 7b)**, và với module cleaning: đúng số dòng xoá/flag theo từng kịch bản, không đụng đến dòng không liên quan.
 
 **Cấu trúc file dữ liệu output** (`data/processed/`, đã `.gitignore` do dung lượng lớn — mỗi máy phải tự chạy lại mục 18 để tạo, không lấy được qua git):
 
@@ -573,7 +641,7 @@ Yêu cầu: Python 3.13 (ví dụ `C:\ProgramData\miniconda3\python.exe`), chạ
 PYTHONPATH=src .venv/Scripts/python.exe -m data_generation.generate_synthetic_fields
 # -> data/processed/transactions_synthetic.parquet (+ sample CSV)
 
-# 3. Kiểm tra leakage + sinh data dictionary
+# 3. Kiểm tra leakage + sinh data dictionary (tự động chỉ đo trên train split 70%, xem mục 7c/9)
 PYTHONPATH=src .venv/Scripts/python.exe -m data_generation.check_leakage
 # -> docs/DATA_DICTIONARY.md
 
@@ -589,18 +657,26 @@ PYTHONPATH=src .venv/Scripts/python.exe -m data_cleaning.cleaning_report
 
 **Nếu file CSV của bạn khác cấu trúc** (thiếu cột): bước 2 sẽ báo `ValueError` nêu rõ tên cột thiếu, thay vì lỗi pandas khó hiểu.
 
-**Nếu bước 3 báo FAIL cho field nào:** mở `generate_synthetic_fields.py`, tìm hằng số điều khiển hệ số high-risk của field đó (ví dụ `NEW_DEVICE_FLAG_HIGH_RISK_P`), giảm nó về gần baseline hơn (nguyên tắc #4 ở mục 4), chạy lại bước 2 rồi bước 3 đến khi tất cả PASS. **Không** "sửa" bằng cách đọc `isFraud` lại — nếu cần tăng tín hiệu, tăng trọng số/độ nhạy của `compute_risk_proxy` với observable, không quay lại label-conditional.
+**Nếu bước 3 báo FAIL cho field nào:** mở `generate_synthetic_fields.py`, tìm hằng số điều khiển hệ số high-risk của field đó (ví dụ `NEW_DEVICE_FLAG_HIGH_RISK_P`), giảm nó về gần baseline hơn (nguyên tắc #4 ở mục 4), chạy lại bước 2 rồi bước 3 đến khi tất cả PASS. **Không** "sửa" bằng cách đọc `isFraud` lại — nếu cần tăng tín hiệu, tăng trọng số/độ nhạy của `compute_risk_proxy` với observable, không quay lại label-conditional. Quyết định giảm/tăng hệ số phải dựa trên **kết quả trên train split** (đã tự động ở bước 3, mục 7c) — không tự ý chạy `check_all_fields()` trên toàn bộ dataset để "chọn" tham số, vì đó chính là train/test leakage ở tầng quy trình.
+
+**Nếu cần tái tạo `amount_percentile` cho 1 giao dịch mới (ví dụ ở bước feature engineering/serving sau này):** không gọi lại `compute_risk_proxy` trên riêng giao dịch đó — phải lưu lại `amount_percentile_reference` (dict trả về từ `fit_amount_percentile_reference()`, fit trên train split) rồi gọi `apply_amount_percentile(type, amount, reference)` cho giao dịch mới. Xem mục 7c để biết vì sao (fit-trên-train / transform-mọi-nơi).
 
 ## 19. Giới hạn & rủi ro đã biết
+
+**Đã sửa (không còn là giới hạn, giữ lại để biết lịch sử):**
+- ~~`amount_percentile` tính trong batch, leak train/test nếu batch bị chia sau đó~~ — đã tách fit-trên-train/apply-mọi-nơi, xem mục 7c.
+- ~~`device_id`/`new_device_flag` sinh độc lập, mâu thuẫn logic trên account lặp lại~~ — đã sinh đồng thời theo lịch sử account, xem mục 7b. Verify trên data thật: 0 vi phạm/18.611 dòng.
+- ~~Module không nói rõ ràng buộc offline-only~~ — đã thêm module-level docstring, xem mục 7d.
+- ~~Quyết định giảm/tăng hệ số fraud dựa trên AUC của toàn bộ dataset~~ — `check_leakage.py` giờ chỉ đo trên train split, xem mục 7c/9.
 
 **Phần A (synthetic) — đọc kỹ trước khi trình bày, đây là phần dễ bị chất vấn nhất:**
 
 - **Tính vòng lặp (circularity) vẫn còn, chỉ đổi hình thức.** Chuyển sang label-free (không đọc `isFraud`) giải quyết 2 vấn đề: (a) field không còn phụ thuộc vào thứ chưa biết được lúc scoring giao dịch mới, (b) code không còn "mùi leakage" đọc trực tiếp nhãn. Nó **không** làm dữ liệu thực tế hơn và **không** xoá hết tính vòng lặp — 5 field conditional vẫn được tiêm tương quan **do thiết kế** (qua risk proxy tự chọn), không phải học từ hành vi fraud thật. Tương quan đo được với `isFraud` (mục 9) là bằng chứng của quy trình kiểm soát rủi ro, **không phải** bằng chứng các field này sẽ dự đoán tốt trên fraud thật ngoài PaySim.
 - **5 field conditional gần như không mang thêm thông tin ngoài `type`/`amount`/`hour_of_day`.** Vì `risk_score = compute_risk_proxy(type, amount, hour_of_day)`, các field điều kiện theo nó (`customer_account_age_days`, `new_device_flag`, `ip_country`, `shipping_billing_mismatch`, `failed_payment_attempts_24h`) về bản chất thống kê là hàm nhiễu của 3 cột đó. Nếu model ở Module 4-5 đã có `type`/`amount`/`hour_of_day`, 5 field này khó đóng góp thêm sức dự đoán đáng kể — giá trị của chúng nằm ở việc minh hoạ đúng *loại* tín hiệu hệ thống chống fraud thật dùng (device risk, geo mismatch, velocity), không phải ở việc tăng AUC.
-- `amount_percentile` trong `compute_risk_proxy` là percentile-trong-batch (tính trên toàn bộ 6,36M dòng khi build dataset), không phải giá trị tự tính được từ 1 giao dịch đơn lẻ — muốn tái tạo đúng cho giao dịch mới lúc serving cần lưu lại phân phối `amount` theo `type` từ lúc train, không chỉ đọc `type`/`amount` của giao dịch đó.
+- `assign_train_test_split` dùng tỷ lệ cố định 70/30 và seed=123 — đây là **utility cho việc fit `amount_percentile_reference` không leak**, không phải split chính thức cho Model Development (Module 5); team đó có thể cần tỷ lệ/chiến lược split khác (ví dụ stratified theo `isFraud`, hoặc time-based split theo `step`) cho mục đích train/evaluate model, và nên tự quyết định, không bắt buộc dùng lại đúng hàm này.
 - Các hệ số odds-ratio/λ là giả định nghiệp vụ tự đặt, không suy từ số liệu fraud thực tế công khai nào.
 - `shipping_billing_mismatch` được diễn giải lại thành "địa chỉ giao dịch khác địa chỉ đăng ký" do fraud trong PaySim là account-takeover, không phải checkout thẻ.
-- 9.313 `nameOrig` có lặp lại (0,15%) được xử lý như dòng độc lập.
+- 9.298 account (`nameOrig`) có lặp lại (0,15% số dòng liên quan) được xử lý bằng lịch sử thiết bị theo đúng thứ tự `step` (mục 7b) — các field synthetic khác (`browser`, `device_type`, `billing_country`...) vẫn sinh độc lập theo dòng như trước, không có "lịch sử" tương tự.
 - Cột `amount`/số dư gốc lưu ở `float32` — có thể mất độ chính xác nhỏ ở giá trị lớn; không ảnh hưởng 13 field synthetic.
 
 **Phần B (cleaning):**
@@ -648,6 +724,12 @@ A: Vì đây là đặc điểm cố hữu của PaySim (giao dịch đến merc
 
 **Q: Nếu Model Development báo AUC-PR gần 1.0 thì có phải model tốt không?**
 A: Nhiều khả năng **không** — đó là dấu hiệu leakage có sẵn trong `oldbalanceOrg`/`newbalanceOrig` của PaySim gốc (không liên quan phần Synthetic/Cleaning ở đây, đã kiểm chứng không leak ở mục 9). Cần train thêm 1 bản bỏ 2 cột số dư để so sánh — xem mục 19.
+
+**Q: Số liệu leakage ở mục 9 đo trên 70% dữ liệu — vậy 30% còn lại (test split) có được kiểm tra không?**
+A: Không cần kiểm tra riêng, và **không nên** — vì làm vậy sẽ lại phạm đúng lỗi mà việc tách train/test cố tránh (dùng nhãn của dòng "test" để đánh giá/điều chỉnh generation). Ý nghĩa của train split ở đây thuần túy là: `amount_percentile_reference` chỉ được fit từ đó, và quyết định "field này leak hay không" chỉ nên dựa trên đúng phần dữ liệu đó. Toàn bộ 6.362.620 dòng (cả train và test) đều được sinh field, đều có trong `transactions_cleaned.parquet` — `assign_train_test_split` không xoá hay tách file, chỉ là 1 mask nội bộ dùng lúc fit reference.
+
+**Q: `device_id`/`new_device_flag` giờ có cần chạy tuần tự (loop) hay vẫn vectorized như trước?**
+A: **Cả hai** — 99,85% dòng (account chỉ xuất hiện 1 lần) vẫn 100% vectorized như cũ, không đổi hiệu năng. Chỉ ~18.611 dòng thuộc 9.298 account lặp lại mới cần 1 vòng lặp Python có lịch sử (để đảm bảo tính nhất quán, mục 7b) — chi phí không đáng kể trên tổng 6,36 triệu dòng.
 
 **Q: Có thể chạy lại toàn bộ pipeline và ra đúng số liệu giống trong tài liệu này không?**
 A: Có — mọi bước dùng `seed=42` cố định, đã test bằng `test_generate_all_synthetic_fields_is_reproducible_with_same_seed`. Chạy đúng theo mục 18 (Cách chạy end-to-end) từ file gốc `Data/PS_20174392719_1491204439457_log.csv` sẽ ra đúng số dòng/cột/AUC như bảng ở mục 9 và 15.

@@ -144,7 +144,25 @@ FIELD_METADATA: list[dict] = [
 ]
 
 
-def check_all_fields(df: pd.DataFrame, label_col: str = "isFraud") -> pd.DataFrame:
+def check_all_fields(df: pd.DataFrame, label_col: str = "isFraud", row_mask: pd.Series | None = None) -> pd.DataFrame:
+    """Measures each synthetic field's association with the fraud label.
+
+    IMPORTANT - this function reports a diagnostic, it must not become a
+    tuning loop against the full dataset's labels. The one legitimate use of
+    "if FAIL, lower the field's odds-ratio/lambda and regenerate" (documented
+    in README section 18) is fine PROVIDED the decision is made by looking at
+    the association on data the eventual model will also have seen during
+    training - never by tuning against rows that will end up in a held-out
+    validation/test split. If you have a train/test split, pass row_mask
+    (e.g. the train mask) so the check - and any resulting parameter
+    adjustment - is scoped to training data only, consistent with
+    fit_amount_percentile_reference()'s train-only fitting in
+    generate_synthetic_fields.py. Checking the full dataset for reporting
+    purposes after the split-respecting decision has already been made is
+    fine; using the full dataset's labels to CHOOSE parameters is not.
+    """
+    if row_mask is not None:
+        df = df.loc[row_mask]
     label = df[label_col]
     rows = []
     for meta in FIELD_METADATA:
@@ -196,8 +214,15 @@ def build_data_dictionary_markdown(leakage_report: pd.DataFrame) -> str:
 
 
 def main():
+    from data_generation.generate_synthetic_fields import assign_train_test_split
+
     df = pd.read_parquet("data/processed/transactions_synthetic.parquet")
-    report = check_all_fields(df)
+    # Scope the leakage check to the training split only, consistent with
+    # amount_percentile being fit on the training split - see the
+    # check_all_fields() docstring for why the full dataset's labels must
+    # not drive parameter decisions.
+    train_mask = assign_train_test_split(len(df))
+    report = check_all_fields(df, row_mask=train_mask)
     print(report.to_string(index=False))
     failures = report[report["status"] == "FAIL"]
     if len(failures) > 0:
