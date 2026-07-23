@@ -34,7 +34,7 @@ flowchart LR
 
 | Kiểm tra | Kết quả | Lệnh để tự verify lại |
 |---|---|---|
-| Test suite | **82/82 PASS** | `.venv/Scripts/python.exe -m pytest tests/ -v` |
+| Test suite | **116/116 PASS** | `.venv/Scripts/python.exe -m pytest tests/ -v` |
 | Leakage check trên 6.362.620 dòng thật | **13/13 PASS** | `PYTHONPATH=src .venv/Scripts/python.exe -m data_generation.check_leakage` |
 | Không hàm sinh nào đọc `isFraud` | **Xác nhận bằng grep, 0 kết quả sai** | `grep -n "isFraud\|is_fraud" src/data_generation/generate_synthetic_fields.py` |
 | `transactions_synthetic.parquet` | 6.362.620 dòng × **24 cột** | đọc bằng `pandas.read_parquet` |
@@ -257,38 +257,55 @@ Với mỗi account (nameOrig), xử lý các giao dịch theo đúng thứ tự
 
 **Hiệu năng:** chỉ 18.611 dòng (0,29% dữ liệu) chạy qua vòng lặp Python có lịch sử — không đáng kể so với 6.362.620 dòng còn lại vẫn 100% vectorized như cũ.
 
-## 7c. Amount-percentile: fit trên train, không fit trên toàn bộ dataset
+## 7c. Amount-percentile & Tukey fence: fit trên train split, không fit trên toàn bộ dataset
 
-**Vấn đề đã sửa:** `amount_percentile` (1 trong 3 thành phần của `compute_risk_proxy`, mục 7) ban đầu tính bằng `amount.groupby(type).rank(pct=True)` — **rank ngay trong batch đang xử lý**. Nếu batch đó sau này bị chia train/test để train model, thứ hạng percentile của **mọi dòng training** đã bị ảnh hưởng bởi amount của **các dòng sẽ thành test** (vì rank tính trên toàn bộ batch trước khi chia) — đây là 1 dạng train/test leakage: thông tin từ tập test "rò" ngược vào feature của tập train.
+**Vấn đề đã sửa:** `amount_percentile` (1 trong 3 thành phần của `compute_risk_proxy`, mục 7) ban đầu tính bằng `amount.groupby(type).rank(pct=True)` — **rank ngay trong batch đang xử lý**. Tương tự, `is_amount_outlier` (mục 12a, Phần B Cleaning) ban đầu tính Tukey fence (`Q1`/`Q3`) trên **toàn bộ** dataset. Cả 2 đều cùng 1 loại vấn đề: nếu dataset sau này bị chia train/test để train model, thống kê dùng để tạo feature cho **mọi dòng training** đã bị ảnh hưởng bởi giá trị của **các dòng sẽ thành test/validation** — 1 dạng train/test leakage.
 
-**Cách sửa — tách rõ 2 bước fit/transform:**
-
-```
-fit_amount_percentile_reference(type, amount)   # BƯỚC FIT — chỉ gọi trên TRAIN split
-    → với mỗi type, lưu lại toàn bộ amount (đã sort) của CÁC DÒNG TRAIN
-
-apply_amount_percentile(type, amount, reference) # BƯỚC TRANSFORM — gọi cho MỌI dòng (train/test/mới)
-    → percentile[i] = (số giá trị trong reference[type[i]] ≤ amount[i]) / |reference[type[i]]|
-    → dùng np.searchsorted(reference_sorted, amount[i]) — không cần đọc dòng nào khác trong batch hiện tại
-```
-
-`compute_risk_proxy(..., amount_percentile_reference=...)` nhận reference này làm tham số optional. `assign_train_test_split(n, train_fraction=0.7, seed=123)` — utility tách mask train/test, dùng **RNG riêng** (không ảnh hưởng đến các field khác vì mọi random khác vẫn dùng đúng `numpy.random.Generator(seed=42)` như cũ). Pipeline build dataset thật (`main()`) giờ luôn tách 70% train trước khi fit reference:
+**Cách sửa — tách rõ 2 bước fit/transform cho cả 2 trường hợp:**
 
 ```
-train_mask = assign_train_test_split(n)                    # 70% train, seed=123
-result = generate_all_synthetic_fields(df, train_mask=train_mask)
+fit_amount_percentile_reference(type, amount)   # FIT — chỉ trên train rows
+apply_amount_percentile(type, amount, reference) # TRANSFORM — mọi dòng (train/val/test/mới)
+
+fit_tukey_fences(amount)                         # FIT — chỉ trên train rows
+apply_tukey_fences(amount, fences)               # TRANSFORM — mọi dòng
 ```
 
-**Hệ quả quan trọng — reproducible cho 1 giao dịch mới:** vì `apply_amount_percentile` chỉ cần `reference` (đã lưu từ lúc fit) + `(type, amount)` của **đúng dòng đó**, không cần đọc dòng nào khác — đây chính là điều làm `amount_percentile` **tính lại được đúng** cho 1 giao dịch mới lúc scoring, miễn là hệ thống serving lưu lại `reference` từ lúc train (không phải tính lại từ đầu trên batch hiện tại).
+`compute_risk_proxy(..., amount_percentile_reference=...)` và `flag_amount_outliers(..., fences=...)` nhận kết quả fit làm tham số optional.
 
-**`check_leakage.py` cũng đổi theo:** `check_all_fields()` nhận `row_mask` optional, và `main()` chạy check **chỉ trên train split** — nhất quán với việc `amount_percentile_reference` chỉ fit trên train. Đây là lý do số liệu AUC ở mục 9 dưới đây đo trên **70% dữ liệu (train split)**, không phải toàn bộ 6.362.620 dòng như các phiên bản trước.
+## 7e. Split manifest chung 60/20/20 — quyết định của cả nhóm
+
+**Vấn đề trước đó (đã sửa):** ban đầu, `generate_synthetic_fields.py` và `clean_transactions.py` mỗi module tự vẽ 1 split 70/30 **độc lập** (RNG riêng, không liên quan nhau) chỉ để phục vụ việc fit ở trên. Điều này để lại 2 lỗ hổng: (a) không có gì đảm bảo "train" của module A trùng với "train" của module B; (b) khi Module 5 (ML Engineer) cần train/test split thật để train model, không có cách nào chắc chắn dùng lại đúng cùng 1 split — nếu họ tự vẽ split khác, 1 dòng có thể là "train" theo `amount_percentile_reference` nhưng lại là "test" theo model — đúng loại rủi ro leak mà việc tách fit/transform ở mục 7c cố tránh, chỉ là ở tầng cao hơn.
+
+**Quyết định của nhóm:** dùng **đúng 1 split manifest 60/20/20 duy nhất**, lưu thành file riêng (`data/processed/split_manifest.parquet`), **không merge vào** `transactions_cleaned.parquet` (file final vẫn giữ nguyên toàn bộ 6.362.620 dòng, 27 cột, không có cột split). Mọi thành viên cần train/test split — Người 2 (fit `amount_percentile_reference`, fit Tukey fences) và Người 5 (train/evaluate model) — đều đọc từ đúng file này.
+
+**Module mới: `src/data_generation/split_manifest.py`**
+
+| Hàm | Vai trò |
+|---|---|
+| `build_split_manifest(n, train_fraction=0.6, val_fraction=0.2, seed=2024)` | Sinh 1 permutation ngẫu nhiên của `n` chỉ số dòng, cắt thành 3 khối liên tiếp (train/val/test) — đảm bảo mỗi dòng thuộc đúng 1 nhóm, không chồng lấp, không thiếu dòng |
+| `save_split_manifest(manifest, path)` / `load_split_manifest(path)` | Lưu/đọc file `.parquet` (2 cột: `row_index`, `split`) |
+| `get_or_create_split_manifest(n, path)` | **Điểm vào chính mọi module nên dùng** — nếu file đã tồn tại và đúng số dòng, đọc lại (không vẽ lại split mới); nếu chưa có, tạo mới rồi lưu. Raise lỗi nếu file tồn tại nhưng số dòng không khớp (báo hiệu dataset đã đổi, cần tái tạo manifest **có chủ đích**, không tự động ghi đè) |
+| `train_row_mask(manifest, n)` | Trả về mask boolean (đúng thứ tự 0..n-1) cho các dòng "train" — dùng khi chưa có dòng nào bị xoá |
+| `train_mask_for_row_indices(manifest, row_indices)` | Tra cứu theo `row_index` cụ thể (không cần liên tục 0..n-1) — dùng trong `clean_transactions.py`, vì lúc fit Tukey fence, dataset **có thể đã** trải qua 3 bước xoá dòng (missing/duplicate/invalid category), nên index còn lại không còn là dãy liên tục |
+
+**Vì sao 60/20/20 (không phải 70/30 như bản trước):** đây là tỷ lệ train/validation/test chuẩn cho Model Development (Module 5) — có thêm tập validation (20%) để tinh chỉnh hyperparameter/threshold mà không đụng vào test set (chỉ dùng để đánh giá cuối). Bản 70/30 trước chỉ có 2 phần (không có validation) vì lúc đó chỉ phục vụ riêng việc fit thống kê, chưa tính đến nhu cầu của Model Development.
+
+**Thứ tự thực thi:** `generate_synthetic_fields.main()` gọi `get_or_create_split_manifest()` **đầu tiên** (tạo file nếu chưa có) → `clean_transactions.main()` gọi lại **cùng hàm** trên cùng số dòng → tự động đọc lại đúng file đã tạo, không vẽ split mới. Nhờ vậy 2 module luôn dùng chung đúng 1 split mà không cần truyền tay.
+
+**Hệ quả quan trọng — reproducible cho 1 giao dịch mới:** `apply_amount_percentile`/`apply_tukey_fences` chỉ cần kết quả fit (đã lưu) + dữ liệu của **đúng dòng đó**, không cần đọc dòng nào khác — đây là điều làm 2 thống kê này **tính lại được đúng** cho 1 giao dịch mới lúc scoring, miễn là hệ thống serving lưu lại kết quả fit từ lúc train.
+
+**`check_leakage.py` cũng đổi theo:** `check_all_fields()` nhận `row_mask` optional, và `main()` chạy check **chỉ trên train split (60%) của manifest chung** — nhất quán với việc `amount_percentile_reference` chỉ fit trên train. Đây là lý do số liệu AUC ở mục 9 dưới đây đo trên **60% dữ liệu**, không phải 70% (bản trước) hay toàn bộ 6.362.620 dòng.
+
+**Xác nhận trên data thật:** `split_manifest.parquet` — 6.362.620 dòng, đúng tỷ lệ train/val/test = 3.817.572 / 1.272.524 / 1.272.524 (60,00% / 20,00% / 20,00%).
 
 ## 7d. Ràng buộc offline-only
 
 Toàn bộ module `generate_synthetic_fields.py` giờ có **module-level docstring** ghi rõ: đây là công cụ xây dựng dataset ở dạng batch, **không được gọi từ code serving/scoring**. Lý do kỹ thuật cụ thể (không chỉ là lời khuyên):
 - Các hàm sinh field (Bernoulli/Poisson/Lognormal) **mô phỏng** giá trị lịch sử hợp lý để bù cho việc PaySim thiếu field bối cảnh — hệ thống thật **quan sát trực tiếp** các giá trị này (device fingerprint thật, IP thật, số lần thất bại thật), không "tung xúc xắc" lại.
-- `amount_percentile` cần đúng `reference` đã fit từ training (mục 7c) — không tự tính lại đúng nếu chỉ có 1 giao dịch đơn lẻ mà không có reference đã lưu.
+- `amount_percentile` cần đúng `reference` đã fit từ train split của **split manifest chung** (mục 7c/7e) — không tự tính lại đúng nếu chỉ có 1 giao dịch đơn lẻ mà không có reference đã lưu.
 - `generate_device_id_and_new_device_flag` cần lịch sử thiết bị **đầy đủ, đúng thứ tự thời gian** của account đó (mục 7b) — hệ thống serving thật sẽ lưu lịch sử này trong database, không tính lại từ đầu mỗi lần.
+- `get_or_create_split_manifest` (mục 7e) chỉ nên chạy trong pipeline build dataset (batch), không chạy trong code scoring — 1 giao dịch mới lúc serving không có khái niệm "train/val/test", chỉ cần `reference`/`fences` đã fit sẵn.
 
 ## 7a. Nền tảng thuật toán — các phân phối xác suất dùng để sinh field
 
@@ -343,7 +360,7 @@ sequenceDiagram
     Dev->>Check: Review kỹ thuật thứ 4 — kiểm tra train/test hygiene và semantic consistency
     Check->>Dev: (a) amount_percentile fit ngay trên batch đang xử lý -> leak train/test<br/>nếu batch bị chia sau đó; (b) device_id/new_device_flag sinh độc lập -><br/>mâu thuẫn logic trên account lặp lại (~9.298 account, 18.611 dòng)
     Dev->>Check: Tách fit_amount_percentile_reference (chỉ train) / apply_amount_percentile<br/>(mọi dòng); viết generate_device_id_and_new_device_flag joint theo lịch sử account
-    Check->>Dev: Sinh lại trên data thật -> 13/13 PASS (đo trên train split 70%),<br/>0 vi phạm consistency trên 18.611 dòng account lặp lại (mục 7b, 7c)
+    Check->>Dev: Sinh lại trên data thật -> 13/13 PASS (đo trên train split 60% của split manifest chung),<br/>0 vi phạm consistency trên 18.611 dòng account lặp lại (mục 7b, 7c, 7e)
 ```
 
 **Bài học rút ra:** nếu `check_leakage` báo FAIL, đó là quy trình đang hoạt động đúng — không phải bug (xem mục 18 để biết cách xử lý). Cramér's V dùng công thức **hiệu chỉnh bias** vì field cardinality lớn (`device_id`, 50.000 giá trị) bị lệch dương với công thức gốc, đặc biệt nhạy với kích thước dataset.
@@ -352,23 +369,23 @@ sequenceDiagram
 
 Row count và tỷ lệ fraud giữ nguyên (0,1291%) so với file gốc — bước sinh dữ liệu **không làm thay đổi class imbalance**. Xử lý imbalance kỹ thuật (SMOTE, class weight...) không thuộc phạm vi phần này, để lại cho bước feature engineering/modeling phía sau.
 
-**Quan trọng — số liệu dưới đây đo trên TRAIN SPLIT (70% dữ liệu, ~4.454.000 dòng), không phải toàn bộ 6.362.620 dòng.** Đây là thay đổi có chủ đích (mục 7c): dùng đúng cùng tập dữ liệu mà `amount_percentile_reference` được fit trên, để quyết định "field này leak hay không" không bị ảnh hưởng bởi nhãn của các dòng sẽ nằm trong test split.
+**Quan trọng — số liệu dưới đây đo trên TRAIN SPLIT (60% dữ liệu theo split manifest chung, 3.817.572 dòng), không phải toàn bộ 6.362.620 dòng.** Đây là thay đổi có chủ đích (mục 7c/7e): dùng đúng cùng tập dữ liệu mà `amount_percentile_reference` và Tukey fences được fit trên, để quyết định "field này leak hay không" không bị ảnh hưởng bởi nhãn của các dòng sẽ nằm trong validation/test split.
 
-| Field | Metric | Giá trị đo được (train split) | Kết quả |
+| Field | Metric | Giá trị đo được (train split 60%) | Kết quả |
 |---|---|---|---|
-| `hour_of_day` | AUC | 0.6311 | PASS |
-| `is_night_transaction` | AUC | 0.6193 | PASS |
-| `customer_account_age_days` | AUC | 0.5557 | PASS |
+| `hour_of_day` | AUC | 0.6305 | PASS |
+| `is_night_transaction` | AUC | 0.6189 | PASS |
+| `customer_account_age_days` | AUC | 0.5507 | PASS |
 | `device_id` | Cramér's V (hiệu chỉnh bias) | 0.0 | PASS |
 | `browser` | Cramér's V (hiệu chỉnh bias) | 0.0 | PASS |
 | `device_type` | Cramér's V (hiệu chỉnh bias) | 0.0 | PASS |
-| `new_device_flag` | AUC | 0.5099 | PASS |
-| `billing_country` | Cramér's V (hiệu chỉnh bias) | 0.0009 | PASS |
-| `ip_country` | Cramér's V (hiệu chỉnh bias) | 0.0011 | PASS |
-| `ip_billing_distance_km` | AUC | 0.5180 | PASS |
-| `ip_billing_country_mismatch` | Cramér's V (hiệu chỉnh bias) | 0.0041 | PASS |
-| `shipping_billing_mismatch` | AUC | 0.5178 | PASS |
-| `failed_payment_attempts_24h` | AUC | 0.5503 | PASS |
+| `new_device_flag` | AUC | 0.5116 | PASS |
+| `billing_country` | Cramér's V (hiệu chỉnh bias) | 0.0011 | PASS |
+| `ip_country` | Cramér's V (hiệu chỉnh bias) | 0.0007 | PASS |
+| `ip_billing_distance_km` | AUC | 0.5173 | PASS |
+| `ip_billing_country_mismatch` | Cramér's V (hiệu chỉnh bias) | 0.0039 | PASS |
+| `shipping_billing_mismatch` | AUC | 0.5185 | PASS |
+| `failed_payment_attempts_24h` | AUC | 0.5531 | PASS |
 
 **Nhận xét:** so với thiết kế label-conditional cũ (đo trên toàn bộ dataset), AUC của 5 field điều kiện vẫn ở vùng thấp tương tự (0.51–0.56) — chuyển sang đo trên train-split không làm đổi kết luận PASS/FAIL, chỉ làm số liệu chính xác hơn về mặt phương pháp (không lẫn thông tin từ dòng sẽ thành test).
 
@@ -601,16 +618,17 @@ Bảng tham chiếu đầy đủ cho **dataset cuối cùng** (`transactions_cle
 ```
 src/data_generation/
   country_centroids.py          # Bảng tọa độ 20 quốc gia + haversine distance
+  split_manifest.py             # Split manifest chung 60/20/20 (build/save/load/get_or_create/train_row_mask/train_mask_for_row_indices) — mục 7e
   generate_synthetic_fields.py  # compute_risk_proxy (label-free) + 13 hàm sinh field + orchestrator + CLI (CSV -> Parquet)
   check_leakage.py              # AUC / Cramér's V (bias-corrected) + sinh docs/DATA_DICTIONARY.md
 src/data_cleaning/
-  clean_transactions.py         # 6 hàm check/flag + orchestrator clean_dataset() + CLI
+  clean_transactions.py         # 6 hàm check/flag + fit/apply Tukey fences (train-only) + orchestrator clean_dataset() + CLI
   cleaning_report.py            # build_cleaning_report_markdown() + CLI ghi docs/CLEANING_REPORT.md
-tests/data_generation/          # 82 unit test
-tests/data_cleaning/            # 18 unit test
+tests/data_generation/          # 90 unit test (bao gồm 11 test của split_manifest.py)
+tests/data_cleaning/            # 26 unit test
 ```
 
-100 test tổng cộng: đúng tỷ lệ base/high-risk theo từng công thức, tái lập được (reproducibility), không tràn kiểu dữ liệu, bất biến toán học kiểm tra exhaustive, schema guard khi đọc CSV, **static check xác nhận không hàm sinh nào nhận `isFraud` làm tham số**, **test hành vi xác nhận đổi `isFraud` giữ observable cố định thì output không đổi**, **test fit/transform của `amount_percentile` reproducible cho 1 dòng mới dùng reference đã lưu (mục 7c)**, **test tính nhất quán `device_id`/`new_device_flag` cho account lặp lại, kể cả edge-case pool bị dùng hết (mục 7b)**, và với module cleaning: đúng số dòng xoá/flag theo từng kịch bản, không đụng đến dòng không liên quan.
+116 test tổng cộng: đúng tỷ lệ base/high-risk theo từng công thức, tái lập được (reproducibility), không tràn kiểu dữ liệu, bất biến toán học kiểm tra exhaustive, schema guard khi đọc CSV, **static check xác nhận không hàm sinh nào nhận `isFraud` làm tham số**, **test hành vi xác nhận đổi `isFraud` giữ observable cố định thì output không đổi**, **test fit/transform của `amount_percentile` và Tukey fences reproducible cho 1 dòng mới dùng reference/fences đã lưu (mục 7c)**, **test tính nhất quán `device_id`/`new_device_flag` cho account lặp lại, kể cả edge-case pool bị dùng hết (mục 7b)**, **test split manifest: đúng tỷ lệ 60/20/20, không chồng lấp/thiếu dòng, tái lập được theo seed, `get_or_create` đọc lại đúng file có sẵn và raise khi số dòng không khớp, tra cứu theo `row_index` cụ thể (mục 7e)**, và với module cleaning: đúng số dòng xoá/flag theo từng kịch bản, không đụng đến dòng không liên quan.
 
 **Cấu trúc file dữ liệu output** (`data/processed/`, đã `.gitignore` do dung lượng lớn — mỗi máy phải tự chạy lại mục 18 để tạo, không lấy được qua git):
 
@@ -623,6 +641,7 @@ tests/data_cleaning/            # 18 unit test
 | `transactions_synthetic.parquet` | Sau Phần A | 6.362.620 | 24 | Kết quả trung gian (trước cleaning) — input của Phần B, không phải output cuối |
 | `transactions_synthetic.csv` / `.zip` | Sau Phần A | 6.362.620 | 24 | Tương tự bản `.csv`/`.zip` của cleaned, nhưng cho dữ liệu trung gian |
 | `transactions_synthetic_sample.csv` | Sau Phần A | ~5.000 (mẫu stratified) | 24 | Mẫu xem nhanh, không phải data final |
+| `split_manifest.parquet` | Trước Phần A (tạo tự động lần đầu chạy) | 6.362.620 | 2 (`row_index`, `split`) | Split manifest chung 60/20/20 — dùng cho fit `amount_percentile_reference`/Tukey fences (Người 2) và Model Development (Người 5), xem mục 7e. **Không** phải data final, không dùng để train trực tiếp |
 
 ## 18. Cách chạy end-to-end
 
@@ -641,7 +660,7 @@ Yêu cầu: Python 3.13 (ví dụ `C:\ProgramData\miniconda3\python.exe`), chạ
 PYTHONPATH=src .venv/Scripts/python.exe -m data_generation.generate_synthetic_fields
 # -> data/processed/transactions_synthetic.parquet (+ sample CSV)
 
-# 3. Kiểm tra leakage + sinh data dictionary (tự động chỉ đo trên train split 70%, xem mục 7c/9)
+# 3. Kiểm tra leakage + sinh data dictionary (tự động chỉ đo trên train split 60% của split manifest chung, xem mục 7e/9)
 PYTHONPATH=src .venv/Scripts/python.exe -m data_generation.check_leakage
 # -> docs/DATA_DICTIONARY.md
 
@@ -673,7 +692,7 @@ PYTHONPATH=src .venv/Scripts/python.exe -m data_cleaning.cleaning_report
 
 - **Tính vòng lặp (circularity) vẫn còn, chỉ đổi hình thức.** Chuyển sang label-free (không đọc `isFraud`) giải quyết 2 vấn đề: (a) field không còn phụ thuộc vào thứ chưa biết được lúc scoring giao dịch mới, (b) code không còn "mùi leakage" đọc trực tiếp nhãn. Nó **không** làm dữ liệu thực tế hơn và **không** xoá hết tính vòng lặp — 5 field conditional vẫn được tiêm tương quan **do thiết kế** (qua risk proxy tự chọn), không phải học từ hành vi fraud thật. Tương quan đo được với `isFraud` (mục 9) là bằng chứng của quy trình kiểm soát rủi ro, **không phải** bằng chứng các field này sẽ dự đoán tốt trên fraud thật ngoài PaySim.
 - **5 field conditional gần như không mang thêm thông tin ngoài `type`/`amount`/`hour_of_day`.** Vì `risk_score = compute_risk_proxy(type, amount, hour_of_day)`, các field điều kiện theo nó (`customer_account_age_days`, `new_device_flag`, `ip_country`, `shipping_billing_mismatch`, `failed_payment_attempts_24h`) về bản chất thống kê là hàm nhiễu của 3 cột đó. Nếu model ở Module 4-5 đã có `type`/`amount`/`hour_of_day`, 5 field này khó đóng góp thêm sức dự đoán đáng kể — giá trị của chúng nằm ở việc minh hoạ đúng *loại* tín hiệu hệ thống chống fraud thật dùng (device risk, geo mismatch, velocity), không phải ở việc tăng AUC.
-- `assign_train_test_split` dùng tỷ lệ cố định 70/30 và seed=123 — đây là **utility cho việc fit `amount_percentile_reference` không leak**, không phải split chính thức cho Model Development (Module 5); team đó có thể cần tỷ lệ/chiến lược split khác (ví dụ stratified theo `isFraud`, hoặc time-based split theo `step`) cho mục đích train/evaluate model, và nên tự quyết định, không bắt buộc dùng lại đúng hàm này.
+- `split_manifest.py` dùng tỷ lệ cố định 60/20/20 và seed=2024, chọn dòng bằng permutation ngẫu nhiên (không stratify theo `isFraud`, không time-based theo `step`). Đây **là** split chính thức chung cho cả fit thống kê (mục 7c) và Model Development (Module 5) theo quyết định của nhóm (mục 7e) — không phải utility nội bộ riêng của Người 2 như bản 70/30 trước. Nếu Module 5 cần chiến lược split khác (stratified theo `isFraud`, hoặc time-based) cho mục đích riêng, cần thống nhất lại với cả nhóm trước khi đổi, vì `amount_percentile_reference`/Tukey fences đã fit cố định theo đúng phân chia này — đổi split ngầm (không cập nhật `split_manifest.parquet`) sẽ làm 2 bên lệch nhau trở lại.
 - Các hệ số odds-ratio/λ là giả định nghiệp vụ tự đặt, không suy từ số liệu fraud thực tế công khai nào.
 - `shipping_billing_mismatch` được diễn giải lại thành "địa chỉ giao dịch khác địa chỉ đăng ký" do fraud trong PaySim là account-takeover, không phải checkout thẻ.
 - 9.298 account (`nameOrig`) có lặp lại (0,15% số dòng liên quan) được xử lý bằng lịch sử thiết bị theo đúng thứ tự `step` (mục 7b) — các field synthetic khác (`browser`, `device_type`, `billing_country`...) vẫn sinh độc lập theo dòng như trước, không có "lịch sử" tương tự.
@@ -725,8 +744,8 @@ A: Vì đây là đặc điểm cố hữu của PaySim (giao dịch đến merc
 **Q: Nếu Model Development báo AUC-PR gần 1.0 thì có phải model tốt không?**
 A: Nhiều khả năng **không** — đó là dấu hiệu leakage có sẵn trong `oldbalanceOrg`/`newbalanceOrig` của PaySim gốc (không liên quan phần Synthetic/Cleaning ở đây, đã kiểm chứng không leak ở mục 9). Cần train thêm 1 bản bỏ 2 cột số dư để so sánh — xem mục 19.
 
-**Q: Số liệu leakage ở mục 9 đo trên 70% dữ liệu — vậy 30% còn lại (test split) có được kiểm tra không?**
-A: Không cần kiểm tra riêng, và **không nên** — vì làm vậy sẽ lại phạm đúng lỗi mà việc tách train/test cố tránh (dùng nhãn của dòng "test" để đánh giá/điều chỉnh generation). Ý nghĩa của train split ở đây thuần túy là: `amount_percentile_reference` chỉ được fit từ đó, và quyết định "field này leak hay không" chỉ nên dựa trên đúng phần dữ liệu đó. Toàn bộ 6.362.620 dòng (cả train và test) đều được sinh field, đều có trong `transactions_cleaned.parquet` — `assign_train_test_split` không xoá hay tách file, chỉ là 1 mask nội bộ dùng lúc fit reference.
+**Q: Số liệu leakage ở mục 9 đo trên 60% dữ liệu (train split) — vậy 40% còn lại (val + test split) có được kiểm tra không?**
+A: Không cần kiểm tra riêng, và **không nên** — vì làm vậy sẽ lại phạm đúng lỗi mà việc tách train/val/test cố tránh (dùng nhãn của dòng "val"/"test" để đánh giá/điều chỉnh generation). Ý nghĩa của train split ở đây thuần túy là: `amount_percentile_reference` và Tukey fences chỉ được fit từ đó, và quyết định "field này leak hay không" chỉ nên dựa trên đúng phần dữ liệu đó. Toàn bộ 6.362.620 dòng (cả train/val/test) đều được sinh field, đều có trong `transactions_cleaned.parquet` — `split_manifest.py` không xoá hay tách file, chỉ lưu 1 file manifest riêng (`row_index` → `split`) dùng lúc fit reference/fences.
 
 **Q: `device_id`/`new_device_flag` giờ có cần chạy tuần tự (loop) hay vẫn vectorized như trước?**
 A: **Cả hai** — 99,85% dòng (account chỉ xuất hiện 1 lần) vẫn 100% vectorized như cũ, không đổi hiệu năng. Chỉ ~18.611 dòng thuộc 9.298 account lặp lại mới cần 1 vòng lặp Python có lịch sử (để đảm bảo tính nhất quán, mục 7b) — chi phí không đáng kể trên tổng 6,36 triệu dòng.

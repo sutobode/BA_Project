@@ -140,6 +140,56 @@ def test_flag_amount_outliers_flags_nothing_for_tight_distribution():
     assert not result.any()
 
 
+# --- fit/transform split for Tukey fences (train-only fitting) ---
+
+
+def test_fit_tukey_fences_returns_lower_and_upper_bounds():
+    amounts = pd.Series([10.0, 12.0, 11.0, 13.0, 10.0, 12.0])
+    lower, upper = ct.fit_tukey_fences(amounts)
+    assert lower < amounts.min()
+    assert upper > amounts.max()
+
+
+def test_apply_tukey_fences_matches_flag_amount_outliers_with_same_fences():
+    amounts = pd.Series([10.0, 12.0, 11.0, 13.0, 10.0, 12.0, 5000.0])
+    fences = ct.fit_tukey_fences(amounts)
+    applied = ct.apply_tukey_fences(amounts, fences)
+    direct = ct.flag_amount_outliers(amounts)  # fits its own fences from the same data
+    pd.testing.assert_series_equal(applied, direct)
+
+
+def test_apply_tukey_fences_reproducible_for_a_single_new_row_using_persisted_fences():
+    # Core claim: given ONLY a persisted (lower, upper) tuple - no access to
+    # any other rows - a single new transaction's outlier flag is computable
+    # deterministically. This is what makes is_amount_outlier reproducible at
+    # scoring time instead of depending on whatever batch happens to be
+    # passed in.
+    train_amounts = pd.Series([10.0, 11.0, 12.0, 10.5, 11.5, 10.2, 11.8])
+    fences = ct.fit_tukey_fences(train_amounts)
+
+    new_row_amount = pd.Series([5000.0])
+    result_1 = ct.apply_tukey_fences(new_row_amount, fences)
+    result_2 = ct.apply_tukey_fences(new_row_amount, fences)
+    assert result_1.iloc[0] == result_2.iloc[0] == True
+
+
+def test_flag_amount_outliers_with_explicit_fences_does_not_refit_from_input():
+    # If fences are supplied, flag_amount_outliers must use them as-is rather
+    # than silently refitting from `amount` - otherwise passing fences would
+    # be a no-op and train/test leakage would persist.
+    train_amounts = pd.Series([10.0, 11.0, 12.0, 10.5, 11.5, 10.2, 11.8])
+    fences = ct.fit_tukey_fences(train_amounts)
+
+    # A test-only amount far outside the training range - if
+    # flag_amount_outliers refit from this call's own input (batch of size
+    # 1), it would trivially flag nothing (a single value can't be an
+    # outlier against itself). Using the persisted train fences correctly,
+    # it must be flagged.
+    test_amount = pd.Series([5000.0])
+    result = ct.flag_amount_outliers(test_amount, fences=fences)
+    assert result.iloc[0] == True
+
+
 def test_flag_zero_amount_flags_only_zero_values():
     amounts = pd.Series([0.0, 10.0, 0.0, 5.0])
     result = ct.flag_zero_amount(amounts)
@@ -216,3 +266,73 @@ def test_clean_dataset_flags_zero_amount_without_removing_it():
     assert len(cleaned) == 2
     assert report_data["zero_amount"]["rows_flagged"] == 1
     assert cleaned.loc[cleaned["step"] == 1, "is_zero_amount"].iloc[0] == True
+
+
+def test_clean_dataset_with_split_manifest_still_produces_all_required_columns():
+    # Regression guard: passing a split manifest must change which rows the
+    # Tukey fences are fit on, without crashing or silently ignoring the
+    # argument, and must not change the contract (columns, row count).
+    from data_generation.split_manifest import build_split_manifest
+
+    n = 500
+    df = pd.DataFrame([
+        _full_schema_row(step=i + 1, amount=float(10 + i % 5), oldbalanceOrg=100.0, newbalanceOrig=90.0 - (i % 5), isFraud=0)
+        for i in range(n)
+    ])
+    manifest = build_split_manifest(n, seed=1)
+    with_manifest, report_with = ct.clean_dataset(df, split_manifest=manifest)
+    without_manifest, report_without = ct.clean_dataset(df, split_manifest=None)
+    assert {"is_amount_outlier", "is_zero_amount", "is_balance_inconsistent"}.issubset(with_manifest.columns)
+    assert len(with_manifest) == len(df)
+    assert len(without_manifest) == len(df)
+    assert report_with["output_rows"] == report_without["output_rows"] == n
+
+
+def test_clean_dataset_with_split_manifest_is_reproducible():
+    from data_generation.split_manifest import build_split_manifest
+
+    n = 300
+    df = pd.DataFrame([
+        _full_schema_row(step=i + 1, amount=float(10 + i % 7), oldbalanceOrg=100.0, newbalanceOrig=90.0)
+        for i in range(n)
+    ])
+    manifest = build_split_manifest(n, seed=456)
+    result_1, _ = ct.clean_dataset(df, split_manifest=manifest)
+    result_2, _ = ct.clean_dataset(df, split_manifest=manifest)
+    pd.testing.assert_series_equal(result_1["is_amount_outlier"], result_2["is_amount_outlier"])
+
+
+def test_clean_dataset_split_manifest_fences_fit_only_on_train_rows():
+    # Direct verification that the manifest-driven path actually restricts
+    # fitting to train rows, not the full dataset: construct a case where the
+    # train subset and full dataset would produce different Tukey fences,
+    # then confirm the flag matches the train-only fence.
+    from data_generation.split_manifest import build_split_manifest, train_mask_for_row_indices
+
+    n = 200
+    df = pd.DataFrame([
+        _full_schema_row(step=i + 1, amount=float(10 + (i % 5)), oldbalanceOrg=100.0, newbalanceOrig=90.0)
+        for i in range(n)
+    ])
+    # Inject one extreme value into what will be a non-train row, so it
+    # would widen the fence if (incorrectly) included in fitting.
+    manifest = build_split_manifest(n, seed=9)
+    train_mask = train_mask_for_row_indices(manifest, pd.RangeIndex(n))
+    non_train_positions = [i for i in range(n) if not train_mask[i]]
+    df.loc[non_train_positions[0], "amount"] = 999_999.0
+
+    cleaned, _ = ct.clean_dataset(df, split_manifest=manifest)
+    expected_fences = ct.fit_tukey_fences(df.loc[train_mask, "amount"])
+    expected_flags = ct.apply_tukey_fences(cleaned["amount"], expected_fences)
+    pd.testing.assert_series_equal(cleaned["is_amount_outlier"], expected_flags, check_names=False)
+
+
+def test_clean_dataset_raises_when_row_indices_are_not_covered_by_manifest():
+    # A manifest built for a smaller/different dataset that doesn't cover
+    # this df's row_index range must raise, not silently misalign.
+    from data_generation.split_manifest import build_split_manifest
+
+    df = pd.DataFrame([_full_schema_row(step=i + 1) for i in range(50)])
+    manifest = build_split_manifest(10)  # only covers row_index 0..9
+    with pytest.raises(ValueError):
+        ct.clean_dataset(df, split_manifest=manifest)

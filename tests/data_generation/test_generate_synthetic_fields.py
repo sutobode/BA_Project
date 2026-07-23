@@ -413,28 +413,15 @@ def test_compute_risk_proxy_with_explicit_reference_does_not_refit_from_input():
 # --- train/test split utility ---
 
 
-def test_assign_train_test_split_returns_boolean_array_of_correct_length():
-    mask = gsf.assign_train_test_split(1000)
-    assert mask.dtype == bool
-    assert len(mask) == 1000
-
-
-def test_assign_train_test_split_approximately_matches_train_fraction():
-    mask = gsf.assign_train_test_split(100_000, train_fraction=0.7)
-    assert mask.mean() == pytest.approx(0.7, abs=0.01)
-
-
-def test_assign_train_test_split_reproducible_with_same_seed():
-    mask1 = gsf.assign_train_test_split(1000, seed=5)
-    mask2 = gsf.assign_train_test_split(1000, seed=5)
-    assert (mask1 == mask2).all()
-
-
 def test_generate_all_synthetic_fields_with_train_mask_uses_train_only_reference():
     # Regression guard: passing train_mask must change which reference gets
     # fit (train rows only) without crashing or silently ignoring the mask.
+    # train_mask now comes from the shared split_manifest module (see
+    # test_split_manifest.py for that module's own tests); here we just need
+    # any valid boolean mask of the right length.
     df = _make_base_df(1000, 10)
-    train_mask = gsf.assign_train_test_split(len(df), seed=1)
+    rng = np.random.default_rng(1)
+    train_mask = rng.random(len(df)) < 0.6
     with_mask = gsf.generate_all_synthetic_fields(df, seed=42, train_mask=train_mask)
     without_mask = gsf.generate_all_synthetic_fields(df, seed=42, train_mask=None)
     # Both must still produce every required column and preserve row count -

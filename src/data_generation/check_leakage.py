@@ -214,14 +214,16 @@ def build_data_dictionary_markdown(leakage_report: pd.DataFrame) -> str:
 
 
 def main():
-    from data_generation.generate_synthetic_fields import assign_train_test_split
+    from data_generation.split_manifest import get_or_create_split_manifest, train_row_mask
 
     df = pd.read_parquet("data/processed/transactions_synthetic.parquet")
-    # Scope the leakage check to the training split only, consistent with
-    # amount_percentile being fit on the training split - see the
+    # Scope the leakage check to the SHARED training split (same manifest
+    # used to fit amount_percentile_reference and Tukey fences), consistent
+    # with amount_percentile being fit on that same split - see the
     # check_all_fields() docstring for why the full dataset's labels must
     # not drive parameter decisions.
-    train_mask = assign_train_test_split(len(df))
+    manifest = get_or_create_split_manifest(len(df))
+    train_mask = train_row_mask(manifest, len(df))
     report = check_all_fields(df, row_mask=train_mask)
     print(report.to_string(index=False))
     failures = report[report["status"] == "FAIL"]

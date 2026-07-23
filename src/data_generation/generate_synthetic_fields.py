@@ -334,26 +334,6 @@ OUTPUT_PARQUET_PATH = "data/processed/transactions_synthetic.parquet"
 OUTPUT_SAMPLE_CSV_PATH = "data/processed/transactions_synthetic_sample.csv"
 SAMPLE_SIZE = 5000
 
-DEFAULT_TRAIN_FRACTION = 0.7
-
-
-def assign_train_test_split(n: int, train_fraction: float = DEFAULT_TRAIN_FRACTION, seed: int = 123) -> np.ndarray:
-    """Row-independent train/test split mask (True = train). Uses its own
-    numpy.random.Generator seeded separately from the field-generation seed,
-    so calling this (or not) never changes the random draws consumed by
-    generate_all_synthetic_fields() for any other field - the split is an
-    orthogonal concern, not entangled with field values.
-
-    This exists so amount_percentile (see fit_amount_percentile_reference)
-    can be fit on the train split only and then reused unchanged for
-    validation/test rows, instead of being fit on the full dataset - fitting
-    any statistic on the full dataset before a train/test split leaks
-    information about test rows into the training data.
-    """
-    rng = np.random.default_rng(seed)
-    return rng.random(n) < train_fraction
-
-
 def generate_all_synthetic_fields(
     df: pd.DataFrame,
     seed: int = 42,
@@ -373,10 +353,13 @@ def generate_all_synthetic_fields(
     preventing the train/test leakage that fitting on the full dataset would
     cause. When omitted (None), the reference is fit on the full input,
     which is only appropriate when this call's input has no further
-    train/test split downstream (e.g. this dataset-enrichment stage is run
-    before any split, and the split happens later in feature
-    engineering/modeling on the resulting file) - see README for guidance on
-    when to pass train_mask explicitly.
+    train/test split downstream.
+
+    Team decision: the train_mask passed in by main() comes from the SHARED
+    60/20/20 split manifest (see split_manifest.py), not a locally-drawn
+    split - the same manifest clean_transactions.py uses for Tukey fences
+    and that Model Development (Module 5) is expected to reuse, so "train"
+    means the same set of rows everywhere in the pipeline.
     """
     rng = np.random.default_rng(seed)
     n = len(df)
@@ -453,12 +436,17 @@ def build_stratified_sample(df: pd.DataFrame, sample_size: int = SAMPLE_SIZE, se
 
 
 def main():
+    from data_generation.split_manifest import get_or_create_split_manifest, train_row_mask
+
     df = load_raw_transactions()
-    # Fit amount_percentile on a train split, not the full dataset, so this
-    # enrichment stage itself doesn't leak test-row amounts into the
+    # Fit amount_percentile on the shared train split, not the full dataset,
+    # so this enrichment stage itself doesn't leak test-row amounts into the
     # reference distribution used to score every row - see
-    # fit_amount_percentile_reference() and assign_train_test_split().
-    train_mask = assign_train_test_split(len(df))
+    # fit_amount_percentile_reference() and split_manifest.py. This is the
+    # SAME manifest clean_transactions.py and Model Development use, created
+    # once and reused (not redrawn) on every subsequent run.
+    manifest = get_or_create_split_manifest(len(df))
+    train_mask = train_row_mask(manifest, len(df))
     result = generate_all_synthetic_fields(df, seed=42, train_mask=train_mask)
     Path(OUTPUT_PARQUET_PATH).parent.mkdir(parents=True, exist_ok=True)
     result.to_parquet(OUTPUT_PARQUET_PATH, index=False)

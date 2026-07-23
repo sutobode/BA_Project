@@ -8,13 +8,13 @@
 % NOTE: this section documents the Data Cleaning stage, which operates on
 % the output of the Data Generation stage (see the Data Sources and Data
 % Generation section / data_sources_and_generation.tex): the 6,362,620-row,
-% 23-column dataset produced after the twelve synthetic contextual fields
+% 24-column dataset produced after the thirteen synthetic contextual fields
 % were added and validated. This section does not repeat that material.
 % ============================================================================
 
 \section{Data Cleaning and Preprocessing}
 
-This section covers the cleaning stage applied to the enriched dataset (6,362,620 rows, 23 columns) from the generation stage. Six checks were run: three structural checks that can remove rows (missing values, duplicates, invalid categorical values), and three fraud-relevant checks that only flag rows (amount outliers, zero-amount transactions, balance inconsistency). Every check is vectorized, unit-tested, and run against the full dataset, so all figures below are exact counts, not estimates.
+This section covers the cleaning stage applied to the enriched dataset (6,362,620 rows, 24 columns) from the generation stage. Six checks were run: three structural checks that can remove rows (missing values, duplicates, invalid categorical values), and three fraud-relevant checks that only flag rows (amount outliers, zero-amount transactions, balance inconsistency). Every check is vectorized, unit-tested, and run against the full dataset, so all figures below are exact counts, not estimates.
 
 \paragraph{Governing principle.} A row is removed only when it is structurally corrupt. Anything that could plausibly be fraud signal is flagged, never removed. Rare fraud cases often look statistically ``unusual,'' so an indiscriminate cleaning rule risks deleting the signal the model is meant to learn.
 
@@ -30,14 +30,14 @@ All four returned zero violations. The three structural checks below (Sections~\
 \subsection{Missing Values}
 \label{subsec:missing-values}
 
-Missing-value counts were computed across all 23 columns. A row is removed only if \texttt{step}, \texttt{type}, \texttt{amount}, or \texttt{isFraud} is null --- these four are required for a transaction to be analyzable at all. Missingness in any other column is reported but does not trigger removal.
+Missing-value counts were computed across all 24 columns. A row is removed only if \texttt{step}, \texttt{type}, \texttt{amount}, or \texttt{isFraud} is null --- these four are required for a transaction to be analyzable at all. Missingness in any other column is reported but does not trigger removal.
 
 \textbf{Result:} zero missing values in any column; zero rows removed.
 
 \subsection{Duplicates}
 \label{subsec:duplicates}
 
-Full-row duplicates (identical across all 23 columns) were identified and removed. A partial-key match --- e.g.\ same origin account and \texttt{step} --- was deliberately \emph{not} treated as a duplicate, since it can represent two distinct transactions.
+Full-row duplicates (identical across all 24 columns) were identified and removed. A partial-key match --- e.g.\ same origin account and \texttt{step} --- was deliberately \emph{not} treated as a duplicate, since it can represent two distinct transactions.
 
 \textbf{Result:} zero full-row duplicates; zero rows removed.
 
@@ -53,7 +53,7 @@ Every categorical and Boolean field was checked against its known set of valid v
 
 Unlike the checks above, outlier treatment surfaced substantial findings. None of them removed a row.
 
-\paragraph{Amount outliers.} \texttt{amount} was screened with Tukey's interquartile-range (IQR) fence,\footnote{Tukey, J. W. (1977). \emph{Exploratory Data Analysis}. Addison-Wesley.} flagging values outside \([Q_1 - 1.5 \times \mathrm{IQR},\ Q_3 + 1.5 \times \mathrm{IQR}]\). \textbf{Result: 338,078 transactions (5.31\%)} flagged via a new \texttt{is\_amount\_outlier} column. These are kept, not removed: an unusually large amount is exactly the kind of signal a fraud model should learn from.
+\paragraph{Amount outliers.} \texttt{amount} was screened with Tukey's interquartile-range (IQR) fence,\footnote{Tukey, J. W. (1977). \emph{Exploratory Data Analysis}. Addison-Wesley.} flagging values outside \([Q_1 - 1.5 \times \mathrm{IQR},\ Q_3 + 1.5 \times \mathrm{IQR}]\). To avoid leaking information from validation/test rows into a feature that may later be used by a model, \(Q_1\) and \(Q_3\) are fit only on the training rows of a shared 60/20/20 train/validation/test split manifest (produced once and reused by both the generation and cleaning stages), then applied to every row. \textbf{Result: 338,078 transactions (5.31\%)} flagged via a new \texttt{is\_amount\_outlier} column. These are kept, not removed: an unusually large amount is exactly the kind of signal a fraud model should learn from.
 
 \paragraph{Zero-amount transactions.} A separate check flags \(\texttt{amount} = 0\). \textbf{Result: 16 transactions}, all \texttt{CASH\_OUT}, and all already labeled \(\texttt{isFraud}=1\) --- every zero-amount transaction in the dataset is a confirmed fraud case. Removing them under a naive ``implausible value'' rule would delete real fraud examples. Flagged via \texttt{is\_zero\_amount} and kept.
 
@@ -62,7 +62,7 @@ Unlike the checks above, outlier treatment surfaced substantial findings. None o
 \subsection{Before/After Summary}
 \label{subsec:before-after-summary}
 
-Table~\ref{tab:cleaning-before-after} summarizes all six checks on the full 6,362,620-row dataset. The three structural checks removed zero rows in total; the three flag checks each added one Boolean column without changing the row count. The dataset grows from 23 to \textbf{26 columns}; row count and fraud rate (0.1291\%) are unchanged from the generation stage.
+Table~\ref{tab:cleaning-before-after} summarizes all six checks on the full 6,362,620-row dataset. The three structural checks removed zero rows in total; the three flag checks each added one Boolean column without changing the row count. The dataset grows from 24 to \textbf{27 columns}; row count and fraud rate (0.1291\%) are unchanged from the generation stage.
 
 \begin{table}[htbp]
 \centering
@@ -83,6 +83,6 @@ Balance inconsistency & 6,362,620 & 5,118,892 (80.45\%) & Flagged, retained \\
 \end{tabular}
 \end{table}
 
-\paragraph{Implementation and verification.} All six checks are vectorized \texttt{pandas}/\texttt{numpy} functions --- no row-wise iteration over 6.36 million rows --- composed into a single orchestrator that runs the three removal checks first, then the three flag checks. Eighteen unit tests cover the individual checks and the orchestrator; all eighteen pass. The before/after report is generated programmatically from the same code that performs the checks, so it cannot drift from what was actually executed. Running the pipeline against the full dataset reproduced the preliminary-survey figures exactly. The resulting 26-column dataset was written out as the final artifact, along with a smaller stratified sample (same 0.1291\% fraud rate) for quick inspection.
+\paragraph{Implementation and verification.} All six checks are vectorized \texttt{pandas}/\texttt{numpy} functions --- no row-wise iteration over 6.36 million rows --- composed into a single orchestrator that runs the three removal checks first, then the three flag checks. Twenty-six unit tests cover the individual checks, the Tukey-fence fit/transform split, and the orchestrator; all twenty-six pass. The before/after report is generated programmatically from the same code that performs the checks, so it cannot drift from what was actually executed. Running the pipeline against the full dataset reproduced the preliminary-survey figures exactly. The resulting 27-column dataset was written out as the final artifact, along with a smaller stratified sample (same 0.1291\% fraud rate) for quick inspection.
 
 \paragraph{Limitations.} The 1.5\(\times\)IQR fence is a common convention, not the only valid threshold; a later modeling stage may reasonably adopt a different one. The two outlier-related flags mark rows without asserting that flagged rows are fraudulent, or that unflagged rows are not --- whether to use them as model features is left to the modeling stage. The invalid-value checks validate against the category sets used in the current generation run; if that stage's parameters change, this stage validates against the updated sets automatically, but any externally sourced data would need its categories reconciled first.
