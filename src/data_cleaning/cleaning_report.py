@@ -39,8 +39,12 @@ def build_cleaning_report_markdown(report_data: dict) -> str:
     lines.append(
         f"| balance_inconsistent | {report_data['output_rows']} | "
         f"{report_data['balance_inconsistent']['rows_flagged']} | flagged (kept) | "
-        f"Column: is_balance_inconsistent. **This is a known PaySim data characteristic "
-        f"(destination/merchant balances often untracked), not a data-entry error** - do not "
+        f"Column: is_balance_inconsistent. Direction-aware check on the ORIGIN account only "
+        f"(oldbalanceOrg/newbalanceOrig vs amount and type - CASH_IN deposits, other types "
+        f"withdraw); does not read destination/merchant balances at all. **Most flags on the "
+        f"real dataset come from PaySim recording amount > oldbalanceOrg (an over-draft/"
+        f"insufficient-funds transaction) with newbalanceOrig floored at 0 rather than rejected "
+        f"or negative - a known PaySim data characteristic, not a data-entry error** - do not "
         f"interpret a high count here as a data quality problem. |\n"
     )
     return "".join(lines)

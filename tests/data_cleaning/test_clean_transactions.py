@@ -196,19 +196,44 @@ def test_flag_zero_amount_flags_only_zero_values():
     assert list(result) == [True, False, True, False]
 
 
-def test_flag_balance_inconsistency_flags_mismatched_rows():
+def test_flag_balance_inconsistency_flags_mismatched_withdrawal_rows():
+    type_ = pd.Series(["TRANSFER", "TRANSFER", "CASH_OUT"])
     old = pd.Series([100.0, 100.0, 50.0])
     amount = pd.Series([30.0, 30.0, 20.0])
     new = pd.Series([70.0, 60.0, 30.0])
-    result = ct.flag_balance_inconsistency(old, amount, new)
+    result = ct.flag_balance_inconsistency(type_, old, amount, new)
     assert list(result) == [False, True, False]
 
 
 def test_flag_balance_inconsistency_respects_tolerance():
+    type_ = pd.Series(["TRANSFER"])
     old = pd.Series([100.0])
     amount = pd.Series([30.0])
     new = pd.Series([70.005])
-    result = ct.flag_balance_inconsistency(old, amount, new)
+    result = ct.flag_balance_inconsistency(type_, old, amount, new)
+    assert list(result) == [False]
+
+
+def test_flag_balance_inconsistency_uses_deposit_formula_for_cash_in():
+    # CASH_IN adds money TO the origin account: oldbalanceOrg + amount ==
+    # newbalanceOrig is the correct identity, not oldbalanceOrg - amount.
+    type_ = pd.Series(["CASH_IN", "CASH_IN"])
+    old = pd.Series([100.0, 100.0])
+    amount = pd.Series([30.0, 30.0])
+    new = pd.Series([130.0, 70.0])  # row 0: correctly recorded deposit; row 1: inconsistent
+    result = ct.flag_balance_inconsistency(type_, old, amount, new)
+    assert list(result) == [False, True]
+
+
+def test_flag_balance_inconsistency_does_not_flag_correctly_recorded_cash_in_that_would_fail_withdrawal_formula():
+    # Regression guard for the fixed bug: a correctly-recorded CASH_IN
+    # deposit fails the old (withdrawal-only) formula but must NOT be
+    # flagged under the corrected, direction-aware formula.
+    type_ = pd.Series(["CASH_IN"])
+    old = pd.Series([1000.0])
+    amount = pd.Series([500.0])
+    new = pd.Series([1500.0])
+    result = ct.flag_balance_inconsistency(type_, old, amount, new)
     assert list(result) == [False]
 
 

@@ -323,8 +323,8 @@ The dataset is structurally clean. These checks remain as a safeguard for future
     \item \textbf{Zero-amount transactions}: \textbf{16} transactions, all \texttt{CASH\_OUT}\\
     \small \textbf{All 16 are confirmed fraud} --- removing them would delete real fraud examples.
     \vspace{0.2cm}
-    \item \textbf{Balance inconsistency}: \textbf{5,118,892} transactions (80.45\%)\\
-    \small A known PaySim characteristic (merchant balances untracked) --- \textbf{not a data error}.
+    \item \textbf{Balance inconsistency} (origin account, direction-aware by type): \textbf{3,953,846} transactions (62.14\%)\\
+    \small Mostly PaySim allowing an over-draft on the origin balance, floored at 0 --- \textbf{not a data error, and not a destination/merchant issue}.
 \end{itemize}
 \end{frame}
 
@@ -339,12 +339,12 @@ Duplicates & 6,362,620 & 0 & Removed \\
 Invalid values & 6,362,620 & 0 & Removed \\
 Amount outliers & 6,362,620 & 338,078 (5.31\%) & Flagged, retained \\
 Zero-amount & 6,362,620 & 16 & Flagged, retained \\
-Balance inconsistency & 6,362,620 & 5,118,892 (80.45\%) & Flagged, retained \\
+Balance inconsistency & 6,362,620 & 3,953,846 (62.14\%) & Flagged, retained \\
 \bottomrule
 \end{tabular}
 \vspace{0.4cm}
 \begin{center}
-23 columns \(\rightarrow\) \textbf{26 columns}. Row count and fraud rate (0.1291\%) unchanged.
+24 columns \(\rightarrow\) \textbf{27 columns}. Row count and fraud rate (0.1291\%) unchanged.
 \end{center}
 \end{frame}
 

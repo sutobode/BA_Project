@@ -80,17 +80,17 @@ Chạy trên `transactions_synthetic.parquet` (output Giai đoạn 1):
 | Missing values, duplicate toàn dòng, invalid category, số dư âm, format `nameOrig`/`nameDest`, khoảng trống `step`, bất biến chéo giữa các field | **0 tất cả** — dataset sạch về cấu trúc |
 | `amount = 0` | 16 dòng — **toàn bộ đều là fraud thật** |
 | `amount` outlier (Tukey IQR) | 338.078 dòng (5,31%) |
-| `oldbalanceOrg − amount ≠ newbalanceOrig` | 5.118.892 dòng (80,45%) — đặc điểm đã biết của PaySim, không phải lỗi |
+| Balance inconsistency (account nguồn, direction-aware theo `type`) | 3.953.846 dòng (62,14%) — phần lớn (96,8%) là PaySim cho phép rút/chuyển vượt số dư rồi floor về 0, đặc điểm đã biết của PaySim, không phải lỗi (README mục 12b) |
 
 ### 4.2. Nguyên tắc thiết kế: Flag, không xoá
 
-Vì 16 dòng `amount=0` đều là fraud thật và 80% "balance inconsistent" là đặc điểm nguồn dữ liệu, quyết định: **chỉ xoá dòng khi là lỗi cấu trúc thật** (missing ở cột trọng yếu, duplicate toàn dòng, category không hợp lệ — cả 3 loại này đều = 0 dòng trên dữ liệu thật); mọi bất thường có thể liên quan fraud thì **flag bằng cột boolean, giữ nguyên dòng**.
+Vì 16 dòng `amount=0` đều là fraud thật và 62% "balance inconsistent" là đặc điểm nguồn dữ liệu, quyết định: **chỉ xoá dòng khi là lỗi cấu trúc thật** (missing ở cột trọng yếu, duplicate toàn dòng, category không hợp lệ — cả 3 loại này đều = 0 dòng trên dữ liệu thật); mọi bất thường có thể liên quan fraud thì **flag bằng cột boolean, giữ nguyên dòng**.
 
 ### 4.3. Code
 
-- `src/data_cleaning/clean_transactions.py` — 6 hàm check/flag (`check_missing_critical`, `dedupe_exact`, `check_invalid_categories`, `flag_amount_outliers`, `flag_zero_amount`, `flag_balance_inconsistency`) + `fit_tukey_fences`/`apply_tukey_fences` (fit chỉ trên train split, mục 5 vấn đề #7) + orchestrator `clean_dataset()` + CLI
+- `src/data_cleaning/clean_transactions.py` — 6 hàm check/flag (`check_missing_critical`, `dedupe_exact`, `check_invalid_categories`, `flag_amount_outliers`, `flag_zero_amount`, `flag_balance_inconsistency` — nay nhận thêm `type_` để dùng đúng chiều cộng/trừ theo loại giao dịch, README mục 12b) + `fit_tukey_fences`/`apply_tukey_fences` (fit chỉ trên train split, mục 5 vấn đề #7) + orchestrator `clean_dataset()` + CLI
 - `src/data_cleaning/cleaning_report.py` — sinh `docs/CLEANING_REPORT.md` tự động
-- **26 unit test**
+- **28 unit test**
 
 ### 4.4. Kết quả trên dữ liệu thật
 
@@ -101,7 +101,7 @@ Vì 16 dòng `amount=0` đều là fraud thật và 80% "balance inconsistent" l
 | Invalid categories | Xoá nếu có | 0 dòng xoá |
 | `is_amount_outlier` | Flag | 338.078 dòng (5,31%) |
 | `is_zero_amount` | Flag | 16 dòng |
-| `is_balance_inconsistent` | Flag | 5.118.892 dòng (80,45%) |
+| `is_balance_inconsistent` | Flag | 3.953.846 dòng (62,14%) |
 
 Row count không đổi: 6.362.620 dòng, 27 cột (24 cột từ Giai đoạn 1 + 3 cột flag mới). Ý nghĩa chi tiết từng cột flag: xem README mục 14 và mục 16 (full field reference).
 
@@ -120,10 +120,11 @@ Row count không đổi: 6.362.620 dòng, 27 cột (24 cột từ Giai đoạn 1
 | 5 | Code sinh 5 field (`customer_account_age_days`, `new_device_flag`, `ip_country`, `shipping_billing_mismatch`, `failed_payment_attempts_24h`) đọc trực tiếp `isFraud` để chọn tham số (`if is_fraud: p=0.12 else 0.04`) — là dấu hiệu leakage kinh điển với người review fraud detection, và feature không tái tạo được cho giao dịch mới tại thời điểm scoring (chưa biết `isFraud`) | Review kỹ thuật độc lập, đối chiếu với yêu cầu Module 6 (API phải score giao dịch mới real-time) | Viết `compute_risk_proxy()` label-free (chỉ dùng `type`/`amount`/`hour_of_day`, cố ý tránh `oldbalanceOrg`/`newbalanceOrig` vì 2 cột này gần-xác-định `isFraud` trong PaySim); 5 hàm sinh field đổi sang nhận `risk_score` thay `is_fraud`; thêm test static + hành vi xác nhận không đọc nhãn; regenerate toàn bộ artifact từ file CSV gốc | 13/13 field vẫn PASS leakage check; AUC 5 field đổi giảm từ 0,55–0,67 xuống 0,51–0,55 (đúng kỳ vọng — tín hiệu yếu hơn vì không còn đọc nhãn trực tiếp); 82/82 test pass |
 | 6 | Review kỹ thuật thứ 2 (sau khi đã label-free) phát hiện 4 vấn đề còn sót: (a) `amount_percentile` fit ngay trên batch đang xử lý, leak train/test nếu batch bị chia sau đó; (b) quyết định giảm/tăng hệ số fraud dựa trên AUC đo trên **toàn bộ** dataset — cũng là 1 dạng leak ở tầng quy trình (nhìn nhãn của dòng sẽ-thành-test để chọn tham số); (c) module chưa có ràng buộc kỹ thuật rõ ràng cho việc "offline-only"; (d) `device_id` và `new_device_flag` sinh hoàn toàn độc lập — với ~9.298 account lặp lại (18.611 dòng), `new_device_flag=False` (nghĩa là "thiết bị đã biết") nhưng `device_id` gần như luôn khác thiết bị trước đó của account (~1/50.000 trùng), mâu thuẫn logic | Review kỹ thuật độc lập lần 2, dựa trên checklist 4 điểm cụ thể được yêu cầu rà soát | (a)+(b): tách `fit_amount_percentile_reference()` (chỉ train split) / `apply_amount_percentile()` (mọi dòng); `check_leakage.py` giờ chỉ đo trên train split. (c): thêm module-level docstring OFFLINE-ONLY + docstring chi tiết từng hàm. (d): viết `generate_device_id_and_new_device_flag()` sinh đồng thời, có lịch sử theo account (theo thứ tự `step`), có pool-exhaustion guard | 100/100 test pass (18 test mới); regenerate từ CSV gốc: 13/13 leakage PASS trên train split (70%, tự tách riêng bằng `assign_train_test_split`); verify thực nghiệm trên data thật: 0 vi phạm consistency trên toàn bộ 18.611 dòng thuộc 9.298 account lặp lại |
 | 7 | Review từ đồng team (Người 5 — Model Development) chỉ ra 2 vấn đề còn lại: (a) split 70/30 ở vấn đề #6 là utility **riêng của Giai đoạn 1**, không đảm bảo Giai đoạn 2 (`clean_transactions.py`) dùng cùng split khi fit Tukey IQR fences — nếu `is_amount_outlier` dùng làm model feature, fences fit lẫn cả dòng sẽ-thành-test là leak; (b) không có 1 split dùng chung, thống nhất cho toàn bộ pipeline lẫn Model Development, mỗi module tự vẽ split riêng (`seed=123` ở Giai đoạn 1, `seed=456` ở Giai đoạn 2) | Review chéo giữa các thành viên, đối chiếu comment cụ thể trên PR | Cả nhóm chốt quyết định: bỏ 2 split độc lập (70/30 mỗi module), thay bằng **1 split manifest chung 60/20/20** (`src/data_generation/split_manifest.py`, seed=2024), lưu file riêng `data/processed/split_manifest.parquet` (không thêm cột vào `transactions_cleaned.parquet`). `generate_synthetic_fields.py` dùng train split của manifest để fit `amount_percentile_reference`; `clean_transactions.py` dùng đúng cùng manifest để fit Tukey fences (`fit_tukey_fences`); `check_leakage.py` đo trên đúng train split đó. Thêm 60/20/20 thay 70/30 vì Model Development cần thêm tập validation | 116/116 test pass (11 test mới cho `split_manifest.py`); regenerate toàn bộ từ CSV gốc: split manifest đúng tỷ lệ 3.817.572/1.272.524/1.272.524 (60/20/20); 13/13 leakage PASS trên train split mới; 0 vi phạm device consistency (như vấn đề #6); `transactions_cleaned.parquet` giữ nguyên 27 cột, 6.362.620 dòng |
+| 8 | Rà soát cuối cùng trước khi bàn giao phát hiện `flag_balance_inconsistency` dùng **1 công thức duy nhất** (`oldbalanceOrg - amount == newbalanceOrig`) cho **mọi** loại giao dịch — sai hướng cho `CASH_IN` (tiền nạp VÀO account nguồn, phải dùng công thức cộng, không phải trừ), khiến ~1,4 triệu dòng `CASH_IN` (22% dataset) bị flag sai. Đồng thời, lời giải thích tỷ lệ cao trong tài liệu ("đặc điểm PaySim: merchant/destination balance không track") **mâu thuẫn với chính code** — hàm này chưa từng đọc `oldbalanceDest`/`newbalanceDest` | Rà soát code thật (không dựa vào tài liệu cũ), verify bằng số liệu thực tế trên `transactions_cleaned.parquet`: breakdown theo `type`, so sánh công thức cộng/trừ, kiểm tra tương quan với account đích | Sửa `flag_balance_inconsistency(type_, old_balance_org, amount, new_balance_orig, tolerance)` — dùng công thức cộng cho `CASH_IN`, công thức trừ cho 4 loại còn lại; thêm 2 test mới xác nhận hành vi đúng cho `CASH_IN`; viết lại giải thích trong README/CLEANING_REPORT: nguyên nhân thật (verify được 96,8% sau khi loại `CASH_IN`) là PaySim cho phép `amount > oldbalanceOrg` (over-draft) rồi floor `newbalanceOrig` về 0 — đặc điểm ở **account nguồn**, không liên quan account đích/merchant | 118/118 test pass (2 test mới); regenerate `transactions_cleaned.parquet`/`docs/CLEANING_REPORT.md` từ CSV gốc: `is_balance_inconsistent` giảm từ 5.118.892 (80,45%, công thức sai) xuống **3.953.846 (62,14%, công thức đúng)**; các số liệu/cột khác (`is_amount_outlier`, `is_zero_amount`, split manifest, device consistency) không đổi vì không liên quan bug này |
 
 ## 6. Kết quả kiểm thử tổng hợp
 
-- **116/116 unit test pass** (90 cho Synthetic Generation + 26 cho Data Cleaning)
+- **118/118 unit test pass** (90 cho Synthetic Generation + 28 cho Data Cleaning)
 - 2 lượt **review tổng thể toàn nhánh** (1 cho mỗi giai đoạn), verdict cả 2 lần: **"Ready to merge: Yes"**, 0 lỗi Critical/Important
 - Đã chạy thật và verify độc lập nhiều lần trên toàn bộ 6.362.620 dòng cho cả 2 giai đoạn
 
@@ -138,7 +139,7 @@ src/data_generation/check_leakage.py
 src/data_cleaning/clean_transactions.py
 src/data_cleaning/cleaning_report.py
 tests/data_generation/ (90 test, bao gồm 11 test split_manifest.py)
-tests/data_cleaning/ (26 test)
+tests/data_cleaning/ (28 test, bao gồm 2 test cho công thức direction-aware của balance inconsistency)
 ```
 
 **Dữ liệu output** (`data/processed/`, không commit git do dung lượng):

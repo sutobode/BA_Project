@@ -110,13 +110,42 @@ def flag_zero_amount(amount: pd.Series) -> pd.Series:
     return amount == 0
 
 
+CASH_IN_TYPE = "CASH_IN"
+
+
 def flag_balance_inconsistency(
-    old_balance_org: pd.Series, amount: pd.Series, new_balance_orig: pd.Series, tolerance: float = 0.01
+    type_: pd.Series,
+    old_balance_org: pd.Series,
+    amount: pd.Series,
+    new_balance_orig: pd.Series,
+    tolerance: float = 0.01,
 ) -> pd.Series:
-    """Flags rows where oldbalanceOrg - amount != newbalanceOrig beyond tolerance.
-    This is a known PaySim data characteristic (destination/merchant balances
-    often untracked), not a data-entry error - flagged, not removed."""
-    return (old_balance_org - amount - new_balance_orig).abs() > tolerance
+    """Flags rows where the origin account balance does not move by `amount`
+    in the direction implied by the transaction type, beyond tolerance.
+
+    Direction matters: CASH_IN deposits cash INTO the origin account (balance
+    increases), so the correct identity is oldbalanceOrg + amount ==
+    newbalanceOrig. Every other type (CASH_OUT, DEBIT, PAYMENT, TRANSFER)
+    moves money OUT of the origin account, so the identity is
+    oldbalanceOrg - amount == newbalanceOrig. An earlier version of this
+    check used the "money leaving" formula for every type, including
+    CASH_IN - that under-flagged CASH_IN's true inconsistencies and
+    over-flagged its (correctly-recorded) deposits, since a deposit's
+    balances only satisfy the subtraction identity by coincidence.
+
+    On the real dataset, the dominant driver of a True flag (for the
+    non-CASH_IN types) is PaySim allowing `amount` to exceed
+    `oldbalanceOrg` (an over-draft/insufficient-funds transaction) while
+    still recording newbalanceOrig as floored at 0 rather than rejecting
+    the transaction or letting the balance go negative - NOT missing
+    destination/merchant balance data (this check never reads
+    oldbalanceDest/newbalanceDest at all). See README section 12b for the
+    verified breakdown."""
+    is_cash_in = type_ == CASH_IN_TYPE
+    diff_deposit = old_balance_org + amount - new_balance_orig
+    diff_withdrawal = old_balance_org - amount - new_balance_orig
+    diff = diff_deposit.where(is_cash_in, diff_withdrawal)
+    return diff.abs() > tolerance
 
 
 from pathlib import Path
@@ -174,7 +203,7 @@ def clean_dataset(df: pd.DataFrame, split_manifest: pd.DataFrame | None = None) 
     out["is_amount_outlier"] = flag_amount_outliers(out["amount"], fences=fences)
     out["is_zero_amount"] = flag_zero_amount(out["amount"])
     out["is_balance_inconsistent"] = flag_balance_inconsistency(
-        out["oldbalanceOrg"], out["amount"], out["newbalanceOrig"]
+        out["type"], out["oldbalanceOrg"], out["amount"], out["newbalanceOrig"]
     )
 
     report_data["amount_outliers"] = {"rows_flagged": int(out["is_amount_outlier"].sum())}
