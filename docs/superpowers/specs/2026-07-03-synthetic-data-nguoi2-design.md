@@ -1,8 +1,18 @@
 # Thiết kế: Sinh Synthetic Contextual Data cho Fraud Detection (Người 2 — Data Engineer)
 
-**Ngày:** 2026-07-03
+**Ngày:** 2026-07-03 (cập nhật 2026-07-23 — chuyển sang label-free generation, xem mục 0)
 **Phạm vi:** Module 1 (Business Understanding & Data Generation) theo `yeucau.txt`
 **Người thực hiện:** Người 2 (Data Engineer), hỗ trợ bởi Người 3 khi cần cho EDA
+
+## 0. Cập nhật 2026-07-23 — Chuyển sang Label-Free Generation
+
+Thiết kế ban đầu (mục 2-9 dưới đây) điều kiện 5 field trực tiếp theo `isFraud` (`if is_fraud: p=0.12 else 0.04`). Sau review, phát hiện 2 vấn đề: (a) field không tái tạo được cho giao dịch mới lúc scoring vì `isFraud` chính là thứ cần dự đoán, chưa biết tại thời điểm đó; (b) đọc trực tiếp nhãn để sinh feature là dấu hiệu leakage kinh điển với người review fraud detection.
+
+**Đã sửa:** thay `isFraud` bằng `risk_score = compute_risk_proxy(type, amount, hour_of_day)` — một risk proxy **label-free** (không đọc `isFraud`, cố ý không dùng `oldbalanceOrg`/`newbalanceOrig` vì 2 cột số dư này gần-xác-định `isFraud` trong PaySim). 5 field vẫn nội suy tuyến tính giữa base và high-risk với đúng biên độ 2-4x như thiết kế gốc — chỉ đổi biến điều kiện. Thêm field mới `ip_billing_country_mismatch` (boolean, derived từ `ip_country != billing_country`).
+
+**Kết quả đo lại trên 6.362.620 dòng thật:** 13/13 field PASS leakage check (ngưỡng không đổi). AUC của 5 field đổi cơ chế giảm xuống 0.51-0.55 (từ 0.55-0.67 cũ) — đúng kỳ vọng, vì risk proxy label-free có tương quan yếu hơn với nhãn thật so với đọc trực tiếp nhãn.
+
+**Đọc mục 2-9 dưới đây với lưu ý:** mọi chỗ nói "điều kiện theo `isFraud`" / "conditional-on-fraud" / số AUC cũ nay đã lỗi thời về mặt cơ chế cụ thể — **nguyên tắc thiết kế** (row-level, giới hạn hệ số 2-4x, derived khi có thể, đo leakage khách quan) vẫn đúng và không đổi, chỉ đổi *biến điều kiện* từ nhãn sang risk proxy quan sát được. Số liệu chính xác nhất: `docs/DATA_DICTIONARY.md` (tự sinh từ code, luôn khớp code hiện tại) và README mục 7-9.
 
 ## 1. Mục tiêu
 
@@ -77,7 +87,9 @@ Sau khi sinh xong toàn bộ field:
 
 Mỗi field ghi đủ các cột sau (Markdown hoặc Excel):
 
-`field_name | data_type | unit | valid_range | generation_type (derived / independent-random / conditional-on-fraud) | logic_or_formula | business_assumption | measured_univariate_AUC_vs_isFraud`
+`field_name | data_type | unit | valid_range | generation_type (derived / independent-random / conditional-on-risk-proxy) | logic_or_formula | business_assumption | measured_univariate_AUC_vs_isFraud`
+
+*(Giá trị enum `conditional-on-risk-proxy` cập nhật theo mục 0 — bản gốc ghi `conditional-on-fraud`, đã lỗi thời.)*
 
 ## 8. Giới hạn & rủi ro đã biết (ghi minh bạch, không che giấu)
 

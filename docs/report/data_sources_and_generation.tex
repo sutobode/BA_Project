@@ -18,7 +18,7 @@
 
 \section{Data Sources and Data Generation}
 
-This section covers the data foundation of the fraud-detection pipeline: the base dataset and its verified properties, the design and validation of twelve synthetic contextual fields, and the resulting data dictionary.
+This section covers the data foundation of the fraud-detection pipeline: the base dataset and its verified properties, the design and validation of thirteen synthetic contextual fields, and the resulting data dictionary.
 
 \subsection{Base Dataset}
 \label{subsec:base-dataset}
@@ -66,19 +66,19 @@ This same profiling later fed a separately documented Data Cleaning stage, which
 \subsection{Synthetic Contextual Data}
 \label{subsec:synthetic-data}
 
-\paragraph{Motivation.} The base dataset has only raw financial fields --- it lacks the behavioral and e-commerce context a production fraud system would observe: device fingerprinting, IP-to-billing geolocation consistency, account tenure, payment-retry behavior, and temporal usage patterns. Twelve contextual fields were generated in Python using \texttt{Faker} plus custom, documented business logic to close this gap.
+\paragraph{Motivation.} The base dataset has only raw financial fields --- it lacks the behavioral and e-commerce context a production fraud system would observe: device fingerprinting, IP-to-billing geolocation consistency, account tenure, payment-retry behavior, and temporal usage patterns. Thirteen contextual fields were generated in Python using \texttt{Faker} plus custom, documented business logic to close this gap.
 
-\paragraph{Generation methodology.} All twelve fields are fully vectorized \texttt{numpy}/\texttt{pandas} operations run on the complete dataset in one pass --- no row-wise iteration, no sub-sampling. All randomness comes from a single seeded generator (\texttt{numpy.random.Generator}, seed 42), so the pipeline is exactly reproducible; this was verified, not assumed. The code is organized into three modules (a geographic-distance utility, field generation, and leakage validation/reporting) and was developed test-first: fifty-two unit tests assert each field's statistical behavior, mathematical consistency, and edge cases; all fifty-two pass. Five design principles governed generation:
+\paragraph{Generation methodology.} All thirteen fields are fully vectorized \texttt{numpy}/\texttt{pandas} operations run on the complete dataset in one pass --- no row-wise iteration, no sub-sampling. All randomness comes from a single seeded generator (\texttt{numpy.random.Generator}, seed 42), so the pipeline is exactly reproducible; this was verified, not assumed. The code is organized into three modules (a geographic-distance utility, field generation, and leakage validation/reporting) and was developed test-first: sixty-four unit tests assert each field's statistical behavior, mathematical consistency, edge cases, and reproducibility; all sixty-four pass. Six design principles governed generation:
 
 \begin{enumerate}
     \item \textbf{Row-level generation.} Given the negligible customer history (Section~\ref{subsec:base-dataset}), fields were generated per transaction, not through a persistent customer profile --- a departure from the entity-profile pattern used in commercial fraud systems, justified only because the data does not support it.
-    \item \textbf{Selective conditioning on the fraud label.} Only fields with a plausible link to account-takeover fraud --- an unrecognized device, a geographically inconsistent IP, a young account, an atypical hour, repeated failed attempts --- were conditioned on \texttt{isFraud}. Fields without such a rationale (browser, device type, device ID, billing country) were generated independently. A dataset where every field correlates with the label would be unrealistic and would trivialize the classification task, so several fields were left deliberately uninformative.
+    \item \textbf{Label-free conditioning via an observable risk proxy.} No generation function reads \texttt{isFraud}. Fields with a plausible link to account-takeover fraud --- an unrecognized device, a geographically inconsistent IP, a young account, an atypical hour, repeated failed attempts --- are instead conditioned on a composite risk score computed only from observable transaction attributes available at scoring time: transaction type, the transaction's amount percentile within its own type, and whether it falls in the night window. This score deliberately excludes the account-balance columns (\texttt{oldbalanceOrg}, \texttt{newbalanceOrig}), since those columns near-perfectly determine \texttt{isFraud} in this simulator (fraud drains the account) and would otherwise leak the label through the back door. Fields without a behavioral rationale (browser, device type, device ID, billing country) were generated independently of the risk score. A dataset where every field correlates with the label would be unrealistic and would trivialize the classification task, so several fields were left deliberately uninformative. \texttt{isFraud} is used only after generation, to measure association, train models, and evaluate --- never as a generation input. This design was adopted after an earlier version conditioned directly on \texttt{isFraud}; that version could not be reproduced for a genuinely new transaction at scoring time (\texttt{isFraud} is exactly what is being predicted) and read as a textbook leakage pattern to anyone reviewing the code.
     \item \textbf{Bounded effect sizes.} Every conditional parameter was capped at a modest effect relative to baseline --- roughly 2--4\(\times\) for the Bernoulli and Poisson parameters, a partial shift for the one continuous parameter --- and documented as an explicit business assumption rather than calibrated against external ground truth, since none exists for this population. The bound exists specifically to stop a field becoming a near-deterministic proxy for the label, i.e.\ leakage.
-    \item \textbf{Deterministic derivation where possible.} Fields computable from existing columns --- time-of-day, and IP-to-billing distance --- use a closed-form formula rather than random sampling, for accuracy and to guarantee internal consistency (the distance field is exactly zero whenever the two country fields match).
-    \item \textbf{Post-hoc, objective leakage validation.} Every field's association with the fraud label was measured against a fixed numeric threshold after generation, rather than judged as merely ``looking reasonable.''
+    \item \textbf{Deterministic derivation where possible.} Fields computable from existing columns --- time-of-day, IP-to-billing distance, and the IP/billing country mismatch flag --- use a closed-form formula rather than random sampling, for accuracy and to guarantee internal consistency (the distance and mismatch fields are exactly zero/false whenever the two country fields match).
+    \item \textbf{Post-hoc, objective leakage validation.} Every field's association with the fraud label was measured against a fixed numeric threshold after generation, rather than judged as merely ``looking reasonable.'' This check is retained even though generation is label-free, because a label-free proxy is not automatically leak-free: it must still be verified not to leak through the observable columns it does use.
 \end{enumerate}
 
-Table~\ref{tab:synthetic-fields} summarizes all twelve fields, their generation mechanism, and the parameters used.
+Table~\ref{tab:synthetic-fields} summarizes all thirteen fields, their generation mechanism, and the parameters used.
 
 \begin{table}[htbp]
 \centering
@@ -91,29 +91,32 @@ Table~\ref{tab:synthetic-fields} summarizes all twelve fields, their generation 
 \midrule
 \texttt{hour\_of\_day} & Derived & Hour of day (0--23), computed as \((\texttt{step}-1) \bmod 24\); follows directly from the simulator's own clock. \\
 \texttt{is\_night\_transaction} & Derived & Boolean flag for transactions between 00:00 and 05:59, a conventional definition of ``night'' in temporal fraud studies. \\
-\texttt{customer\_account\_age\_days} & Conditional (log-normal) & Age of the customer account in days (bounded to [1, 3650]); median 400 days for legitimate transactions versus 275 days for fraudulent ones ($\sigma = 0.6$ on both), reflecting the assumption that compromised or mule accounts skew more recently created. \\
+\texttt{customer\_account\_age\_days} & Conditional on risk proxy (log-normal) & Age of the customer account in days (bounded to [1, 3650]); median 400 days at risk score 0 versus 275 days at risk score 1 ($\sigma = 0.6$ on both), reflecting the assumption that compromised or mule accounts skew more recently created. \\
 \texttt{device\_id} & Independent & Device identifier sampled uniformly from a fixed pool of 50,000 Faker-generated UUIDs; carries no signal on its own (the signal instead lives in \texttt{new\_device\_flag}). \\
 \texttt{browser} & Independent & Browser family (Chrome 55\%, Safari 20\%, Edge 12\%, Firefox 8\%, Other 5\%); independent of the fraud label. \\
 \texttt{device\_type} & Independent & Device category (mobile 65\%, desktop 30\%, tablet 5\%); independent of the fraud label. \\
-\texttt{new\_device\_flag} & Conditional (Bernoulli) & Whether the transaction is from a device not previously associated with the account; base rate 4\%, rising to 12\% (3\(\times\) baseline) for fraudulent transactions. \\
+\texttt{new\_device\_flag} & Conditional on risk proxy (Bernoulli) & Whether the transaction is from a device not previously associated with the account; base rate 4\%, rising to 12\% (3\(\times\) baseline) at risk score 1. \\
 \texttt{billing\_country} & Independent & Customer's registered country, sampled from a fixed weighted distribution over 20 countries. \\
-\texttt{ip\_country} & Conditional (Bernoulli) & Country inferred from the transaction's IP; matches \texttt{billing\_country} with probability 93\% (legitimate) or 80\% (fraudulent), and is guaranteed by construction to differ from \texttt{billing\_country} on every non-matching row. \\
+\texttt{ip\_country} & Conditional on risk proxy (Bernoulli) & Country inferred from the transaction's IP; matches \texttt{billing\_country} with probability 93\% (risk score 0) down to 80\% (risk score 1), and is guaranteed by construction to differ from \texttt{billing\_country} on every non-matching row. \\
 \texttt{ip\_billing\_distance\_km} & Derived & Haversine distance, in km, between the \texttt{ip\_country} and \texttt{billing\_country} centroids; exactly zero when the two countries coincide. \\
-\texttt{shipping\_billing\_mismatch} & Conditional (Bernoulli) & Whether the transaction's associated address differs from the account's registered address; base rate 5\%, rising to 15\% for fraudulent transactions. \\
-\texttt{failed\_payment\_attempts\_24h} & Conditional (Poisson) & Failed payment attempts in the preceding 24 hours; mean 0.15 (legitimate), rising to 0.6 (4\(\times\) rate increase) for fraudulent transactions. \\
+\texttt{ip\_billing\_country\_mismatch} & Derived & Boolean equivalent of the distance field above (\texttt{ip\_country} $\neq$ \texttt{billing\_country}), provided as a convenience flag. \\
+\texttt{shipping\_billing\_mismatch} & Conditional on risk proxy (Bernoulli) & Whether the transaction's associated address differs from the account's registered address; base rate 5\%, rising to 15\% at risk score 1. \\
+\texttt{failed\_payment\_attempts\_24h} & Conditional on risk proxy (Poisson) & Failed payment attempts in the preceding 24 hours; mean 0.15 (risk score 0), rising to 0.6 (4\(\times\) rate increase) at risk score 1. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+\paragraph{The risk proxy.} The risk score driving the five conditional fields above is a label-free composite in $[0,1]$: the equally-weighted average of (a) whether the transaction type is \texttt{TRANSFER} or \texttt{CASH\_OUT} --- the only channels this simulator's fraud uses, though the fraud rate within them is still under 1\%, making this a weak channel heuristic rather than a near-deterministic proxy; (b) the transaction's amount rank within its own type, a standard ``unusually large for this channel'' fraud heuristic; and (c) whether the transaction falls in the 00:00--05:59 window. All three components are ordinary observable transaction attributes, not derived from account balances or the label.
+
 \paragraph{Leakage validation.} A feature that correlates too strongly with the fraud label would trivialize the classification task, so each field was validated quantitatively after generation. For continuous/Boolean fields, the univariate AUC against \texttt{isFraud} was computed as \(\max(\mathrm{AUC},\, 1-\mathrm{AUC})\) --- direction-agnostic, since a field that strongly predicts the \emph{absence} of fraud is just as concerning as one that predicts its presence. For categorical fields, Cram\'er's V was used, with Bergsma's (2013) small-sample bias correction\footnote{Bergsma, W. (2013). A bias-correction for Cram\'er's V and Tschuprow's T. \emph{Journal of the Korean Statistical Society}, 42(3), 323--328.} rather than the textbook formula. A field fails if its AUC reaches 0.75 or its corrected Cram\'er's V reaches 0.50 --- thresholds fixed before running the check, not adjusted afterward to force a pass.
 
-\paragraph{Two issues found and fixed.} The validation procedure changed the generation logic twice; it was not a formality.
+\paragraph{Three issues found and fixed.} The validation procedure changed the generation logic three times; it was not a formality.
 
 First, on the initial run against all 6,362,620 rows, \texttt{customer\_account\_age\_days} exceeded the AUC threshold (0.8753) at its original parameterization (fraud median 150 days versus baseline 400) --- too strong a separation to be a realistic signal. The fraud-conditional median was narrowed to 275 days (reducing, not removing, the effect) and the field regenerated; the AUC fell to 0.6689, below threshold.
 
 Second, an independent review of the validation code found that the original (uncorrected) Cram\'er's V formula could report a spuriously high, sample-size-dependent value for the high-cardinality \texttt{device\_id} field (50,000 distinct values) --- as high as approximately 0.48 on a moderate-sized subset, close to the failure threshold, despite \texttt{device\_id} being generated completely independently of the label by construction. This was a contingency-table sparsity artifact, not a real relationship. The bias-corrected estimator was substituted everywhere Cram\'er's V is computed, with no change to the generation logic; \texttt{device\_id}'s corrected association on the full dataset is exactly 0.0000.
 
-Table~\ref{tab:leakage-results} reports the final results on the full dataset after both fixes; all twelve fields pass.
+Third, a later technical review identified that five fields (\texttt{customer\_account\_age\_days}, \texttt{new\_device\_flag}, \texttt{ip\_country}, \texttt{shipping\_billing\_mismatch}, \texttt{failed\_payment\_attempts\_24h}) were, at that point, conditioned directly on \texttt{isFraud}. This was flagged for two reasons: such a field cannot be reconstructed for a genuinely new transaction at real-time scoring time, since \texttt{isFraud} is exactly what is being predicted and is not yet known; and reading the label directly inside a feature-generation function is a pattern any fraud-detection reviewer is trained to treat as a leakage smell, regardless of whether it is bounded. All five fields were rewritten to condition on the label-free risk proxy described above instead, and the dataset was regenerated from the original raw CSV. Table~\ref{tab:leakage-results} reports the results on the full dataset after all three fixes; all thirteen fields pass, with the five reconditioned fields now showing lower AUC (0.51--0.55, versus 0.54--0.67 previously) --- consistent with a weaker, non-circular, label-free signal, not a regression.
 
 \begin{table}[htbp]
 \centering
@@ -126,32 +129,35 @@ Table~\ref{tab:leakage-results} reports the final results on the full dataset af
 \midrule
 \texttt{hour\_of\_day} & AUC & 0.6336 & PASS \\
 \texttt{is\_night\_transaction} & AUC & 0.6217 & PASS \\
-\texttt{customer\_account\_age\_days} & AUC & 0.6689 & PASS \\
+\texttt{customer\_account\_age\_days} & AUC & 0.5508 & PASS \\
 \texttt{device\_id} & Corrected Cram\'er's V & 0.0000 & PASS \\
 \texttt{browser} & Corrected Cram\'er's V & 0.0000 & PASS \\
 \texttt{device\_type} & Corrected Cram\'er's V & 0.0004 & PASS \\
-\texttt{new\_device\_flag} & AUC & 0.5419 & PASS \\
+\texttt{new\_device\_flag} & AUC & 0.5137 & PASS \\
 \texttt{billing\_country} & Corrected Cram\'er's V & 0.0000 & PASS \\
-\texttt{ip\_country} & Corrected Cram\'er's V & 0.0049 & PASS \\
-\texttt{ip\_billing\_distance\_km} & AUC & 0.5651 & PASS \\
-\texttt{shipping\_billing\_mismatch} & AUC & 0.5495 & PASS \\
-\texttt{failed\_payment\_attempts\_24h} & AUC & 0.6589 & PASS \\
+\texttt{ip\_country} & Corrected Cram\'er's V & 0.0018 & PASS \\
+\texttt{ip\_billing\_distance\_km} & AUC & 0.5208 & PASS \\
+\texttt{ip\_billing\_country\_mismatch} & Corrected Cram\'er's V & 0.0047 & PASS \\
+\texttt{shipping\_billing\_mismatch} & AUC & 0.5154 & PASS \\
+\texttt{failed\_payment\_attempts\_24h} & AUC & 0.5533 & PASS \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{Effect on class distribution.} Generating the fields did not alter the class distribution: all 6,362,620 records and the 0.1291\% fraud rate are unchanged. Imbalance remediation (oversampling, class weighting) is deferred to feature engineering/modeling --- this stage only enriches the data. The enriched 23-column dataset was written out as input to the cleaning stage, along with a smaller stratified sample for quick inspection.
+\paragraph{Effect on class distribution.} Generating the fields did not alter the class distribution: all 6,362,620 records and the 0.1291\% fraud rate are unchanged. Imbalance remediation (oversampling, class weighting) is deferred to feature engineering/modeling --- this stage only enriches the data. The enriched 24-column dataset was written out as input to the cleaning stage, along with a smaller stratified sample for quick inspection.
 
-\paragraph{Limitations.} The conditional parameters in Table~\ref{tab:synthetic-fields} are explicit business assumptions, not values calibrated against external ground truth --- none exists for this population; this is an inherent limitation of synthetic augmentation on a dataset not originally collected with this context. Because the fraud label represents account-takeover confined to \texttt{TRANSFER}/\texttt{CASH\_OUT} (Section~\ref{subsec:base-dataset}), \texttt{shipping\_billing\_mismatch} was reframed from its literal e-commerce checkout meaning to an account-takeover one (registered address versus transaction address), to stay consistent with the dataset's actual fraud mechanism. Finally, all fields were generated at the transaction level (Design Principle 1); if this dataset ever gains genuine repeat-customer history, entity-level features (e.g.\ transaction velocity per account) could supplement the row-level fields here.
+\paragraph{Limitations.} Two limitations apply specifically to the label-free redesign and should not be overclaimed. First, switching to a label-free risk proxy removes the leakage smell and the scoring-time reproducibility problem, but it does not make the data more realistic and does not remove circularity: the five conditional fields still carry fraud association by construction, via a hand-chosen proxy, not because they were learned from real behavioral data --- their measured association with \texttt{isFraud} in Table~\ref{tab:leakage-results} is evidence the injected correlation is bounded, not evidence these fields would be predictive on real-world fraud. Second, because the risk proxy is itself a function of \texttt{type}, \texttt{amount}, and \texttt{hour\_of\_day}, the five fields conditioned on it are statistically close to noisy functions of those three columns already present in the base dataset, and are unlikely to add much predictive value beyond them in downstream modeling; their purpose here is to illustrate the \emph{type} of signal a production fraud system would use, not to raise a classifier's AUC.
+
+More generally, the conditional parameters in Table~\ref{tab:synthetic-fields} are explicit business assumptions, not values calibrated against external ground truth --- none exists for this population; this is an inherent limitation of synthetic augmentation on a dataset not originally collected with this context. Because the fraud label represents account-takeover confined to \texttt{TRANSFER}/\texttt{CASH\_OUT} (Section~\ref{subsec:base-dataset}), \texttt{shipping\_billing\_mismatch} was reframed from its literal e-commerce checkout meaning to an account-takeover one (registered address versus transaction address), to stay consistent with the dataset's actual fraud mechanism. All fields were generated at the transaction level (Design Principle 1); if this dataset ever gains genuine repeat-customer history, entity-level features (e.g.\ transaction velocity per account) could supplement the row-level fields here. Finally, a separate and more consequential risk sits outside this stage's scope: the base dataset's own \texttt{oldbalanceOrg}/\texttt{newbalanceOrig} columns near-determine \texttt{isFraud} in this simulator, so a near-1.0 AUC-PR reported in Model Development is more likely evidence of that pre-existing leakage than of strong modeling --- unrelated to the synthetic fields validated here, which measure 0.51--0.55 AUC and are confirmed non-leaky.
 
 \subsection{Data Dictionary}
 \label{subsec:data-dictionary}
 
-\paragraph{Content and structure.} Every synthetic field is formally documented in a structured data dictionary covering all twelve fields (Table~\ref{tab:synthetic-fields}). Each entry records eight attributes: column name, data type, unit, valid range, generation mechanism, the exact formula or distribution, the underlying business assumption, and the measured association with \texttt{isFraud} from Table~\ref{tab:leakage-results} --- labeled with its metric type (AUC or Cram\'er's V) so the two scales are not confused.
+\paragraph{Content and structure.} Every synthetic field is formally documented in a structured data dictionary covering all thirteen fields (Table~\ref{tab:synthetic-fields}). Each entry records eight attributes: column name, data type, unit, valid range, generation mechanism, the exact formula or distribution, the underlying business assumption, and the measured association with \texttt{isFraud} from Table~\ref{tab:leakage-results} --- labeled with its metric type (AUC or Cram\'er's V) so the two scales are not confused.
 
 \paragraph{Automated generation.} The dictionary is generated programmatically by the same module that runs the leakage checks (Section~\ref{subsec:synthetic-data}), not transcribed by hand: it computes each field's association statistic and renders the dictionary directly from that result. This guarantees the documentation cannot drift from the code --- any parameter change is reflected automatically, and every association value is a live measurement, not a manually maintained estimate. This process caught one real defect during development: an early version reported association values without labeling which metric they were, which was fixed so every value is now explicit (e.g.\ ``0.6336 (AUC)'' versus ``0.0049 (Cram\'er's V)'').
 
-\paragraph{Format and scope.} The dictionary is published in Markdown, satisfying the required deliverable format (Markdown or Excel), as a standalone artifact alongside the generation code. Table~\ref{tab:data-dict-excerpt} shows three representative entries; the full dictionary contains all twelve fields.
+\paragraph{Format and scope.} The dictionary is published in Markdown, satisfying the required deliverable format (Markdown or Excel), as a standalone artifact alongside the generation code. Table~\ref{tab:data-dict-excerpt} shows three representative entries; the full dictionary contains all thirteen fields.
 
 \begin{table}[htbp]
 \centering
@@ -162,9 +168,9 @@ Table~\ref{tab:leakage-results} reports the final results on the full dataset af
 \toprule
 \textbf{Field} & \textbf{Type / Range} & \textbf{Generation} & \textbf{Business assumption} \\
 \midrule
-\texttt{new\_device\_flag} & Boolean & Conditional (Bernoulli, $p=0.04\!\to\!0.12$) & Account-takeover fraud is plausibly more often initiated from an unrecognized device, though not certainly so, since sophisticated attackers may spoof a known device fingerprint. \\
+\texttt{new\_device\_flag} & Boolean & Conditional on risk proxy (Bernoulli, $p=0.04\!\to\!0.12$) & Account-takeover fraud is plausibly more often initiated from an unrecognized device, though not certainly so, since sophisticated attackers may spoof a known device fingerprint. Driven by the label-free risk proxy, not \texttt{isFraud}. \\
 \texttt{ip\_billing\_distance\_km} & Float, [0, $\sim$20{,}000] km & Derived from \texttt{ip\_country} / \texttt{billing\_country} & Computed directly from a fixed country-centroid lookup table to guarantee internal consistency with the country-mismatch fields. \\
-\texttt{failed\_payment\_attempts\_24h} & Integer, [0, $\sim$5] & Conditional (Poisson, $\lambda=0.15\!\to\!0.6$) & Attackers are assumed to make repeated failed attempts (e.g.\ credential or card guessing) before a successful transaction. \\
+\texttt{failed\_payment\_attempts\_24h} & Integer, [0, $\sim$5] & Conditional on risk proxy (Poisson, $\lambda=0.15\!\to\!0.6$) & Attackers are assumed to make repeated failed attempts (e.g.\ credential or card guessing) before a successful transaction. Driven by the label-free risk proxy, not \texttt{isFraud}. \\
 \bottomrule
 \end{tabular}
 \end{table}
