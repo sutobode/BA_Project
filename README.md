@@ -8,6 +8,16 @@ Tài liệu này là **nguồn tham khảo đầy đủ, tự chứa** — đọ
 - Data dictionary (tự sinh): [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) · Cleaning report (tự sinh): [`docs/CLEANING_REPORT.md`](docs/CLEANING_REPORT.md)
 - Tổng kết quá trình làm việc (quyết định, vấn đề đã phát hiện & xử lý): [`docs/PROJECT_SUMMARY.md`](docs/PROJECT_SUMMARY.md)
 
+## 0. Bối cảnh nghiệp vụ: PaySim là gì, và bài toán fraud detection
+
+**PaySim** là bộ mô phỏng giao dịch tiền di động (mobile money) dựa trên agent-based simulation, do Lopez-Rojas, Elmir và Axelsson công bố năm 2016. Nó được xây từ log giao dịch thật (đã ẩn danh) của 1 dịch vụ mobile money ở châu Phi trong 1 tháng, rồi **mô phỏng lại** ở quy mô lớn hơn sao cho giữ đúng các đặc tính thống kê của dữ liệu gốc (tỷ lệ fraud, phân phối amount, hành vi theo loại giao dịch...) nhưng có thể công khai chia sẻ mà không lộ thông tin khách hàng thật. Nói cách khác: **các con số trong PaySim không phải giao dịch thật của 1 người cụ thể, nhưng được calibrate để có phân phối thống kê giống thật.**
+
+**5 loại giao dịch mô phỏng:** `CASH_IN` (nạp tiền vào tài khoản), `CASH_OUT` (rút tiền), `DEBIT` (trừ tiền/thanh toán qua thẻ), `PAYMENT` (thanh toán hàng hóa/dịch vụ), `TRANSFER` (chuyển tiền giữa 2 tài khoản).
+
+**Fraud trong PaySim mô phỏng đúng 1 kịch bản: account-takeover.** Một agent "kẻ gian" chiếm được quyền truy cập 1 tài khoản khách hàng, rồi cố **chuyển tiền đi (`TRANSFER`) hoặc rút hết tiền (`CASH_OUT`)** trước khi bị phát hiện. Đây là lý do fraud chỉ xuất hiện ở 2 loại giao dịch này (đo được ở mục 3) — **không mô phỏng** gian lận thẻ tại checkout hay gian lận giả mạo danh tính lúc mở tài khoản.
+
+**Bài toán kinh doanh cần giải (theo đề bài `yeucau.txt`):** với mỗi giao dịch đến, hệ thống phải quyết định gần như ngay lập tức: cho qua (approve), yêu cầu review thủ công, hay chặn (block) — cân bằng giữa **chặn được fraud** (tránh mất tiền) và **không làm phiền khách hàng thật** (friction). Muốn quyết định được, model cần *tín hiệu hành vi* (device, vị trí, thời gian, lịch sử thanh toán...) mà PaySim gốc **không có** — đây chính là lý do tồn tại của Phần A (Synthetic Data Generation) trong tài liệu này. Pipeline ở đây (2 giai đoạn: sinh dữ liệu + làm sạch) là **bước nền tảng đầu tiên** trong toàn bộ 8 module của đề bài; các module sau (EDA, feature engineering, model, deploy, monitor) đều xây trên output `transactions_cleaned.parquet` của pipeline này.
+
 ## 1. Tổng quan toàn bộ pipeline
 
 ```mermaid
@@ -167,10 +177,19 @@ flowchart TD
 | 7 | `new_device_flag` | conditional-on-risk-proxy (Bernoulli) | p = 0.04 → 0.12 (3x) | ~4% giao dịch hợp pháp từ thiết bị mới là hợp lý; risk cao tăng gấp 3 vì account-takeover thường từ thiết bị lạ, nhưng không tuyệt đối |
 | 8 | `billing_country` | độc lập | categorical, 20 quốc gia | Mô phỏng cơ cấu khách hàng nền tảng; tín hiệu nằm ở mismatch (#9, #10a), không phải ở đây |
 | 9 | `ip_country` | conditional-on-risk-proxy | match rate 0.93 → 0.80 | Giao dịch hợp pháp đa số dùng IP đúng quốc gia; risk cao lệch nhiều hơn nhưng vẫn phần lớn trùng (VPN/proxy giúp fraud giả mạo IP) |
-| 10 | `ip_billing_distance_km` | **derived** từ #8, #9 | `haversine(centroid[ip_country], centroid[billing_country])` | Tính trực tiếp bằng bảng tọa độ cố định — đảm bảo nhất quán nội tại, không mâu thuẫn với mismatch flag |
+| 10 | `ip_billing_distance_km` | **derived** từ #8, #9 | Haversine formula (xem giải thích dưới bảng) | Tính trực tiếp bằng bảng tọa độ cố định — đảm bảo nhất quán nội tại, không mâu thuẫn với mismatch flag |
 | 10a | `ip_billing_country_mismatch` | **derived** từ #8, #9 | `ip_country != billing_country` | Bản boolean tiện dụng của cùng mismatch #10 đã capture bằng số — thêm theo tên field trong phân công nhóm |
 | 11 | `shipping_billing_mismatch` | conditional-on-risk-proxy (Bernoulli) | p = 0.05 → 0.15 (3x) | Một số khách hợp pháp có địa chỉ giao khác đăng ký (quà tặng, công ty); risk cao tăng vì có thể đổi hướng nhận tiền/hàng. Diễn giải lại thành "địa chỉ giao dịch khác đăng ký" do fraud PaySim là account-takeover, không phải checkout thẻ |
 | 12 | `failed_payment_attempts_24h` | conditional-on-risk-proxy (Poisson) | λ = 0.15 → 0.6 (4x) | Đa số giao dịch hợp pháp không có lần thất bại trước; kẻ gian thường thử nhiều lần trước khi thành công |
+
+**Haversine formula là gì (dùng cho `ip_billing_distance_km`):** công thức tính khoảng cách "đường chim bay" (great-circle distance) giữa 2 điểm trên mặt cầu (Trái Đất), biết vĩ độ (latitude) và kinh độ (longitude) của mỗi điểm. Khác với khoảng cách Euclid thông thường (đường thẳng phẳng) vì Trái Đất là hình cầu, không phẳng — 2 điểm cách xa nhau theo kinh độ ở gần cực Bắc/Nam thực ra gần nhau hơn nhiều so với ở xích đạo.
+
+```
+a = sin²(Δlat/2) + cos(lat1) × cos(lat2) × sin²(Δlon/2)
+distance_km = 2 × R × arcsin(√a)          với R = 6371 km (bán kính Trái Đất)
+```
+
+Code dùng toạ độ **trung tâm quốc gia** (centroid) cố định cho 20 quốc gia trong `country_centroids.py` — không phải toạ độ IP/billing thật (không có trong PaySim), nên khoảng cách là **xấp xỉ ở cấp quốc gia**, không phải khoảng cách chính xác giữa 2 địa điểm cụ thể.
 
 **`compute_risk_proxy` gồm 3 thành phần quan sát được (trọng số bằng nhau):**
 - `risky_type`: `type ∈ {TRANSFER, CASH_OUT}` — 2 channel duy nhất có fraud trong PaySim, nhưng tỷ lệ fraud trong đó vẫn < 1%, nên đây là heuristic yếu, không phải proxy gần-quyết-định.
@@ -210,7 +229,29 @@ ip_country[i] = billing_country[i] nếu Bernoulli(match_p[i]) = 1,
 
 **Vì sao chọn nội suy tuyến tính (linear interpolation) chứ không phải if/else 2 giá trị:** `risk_score` là số liên tục trong [0,1], không phải nhị phân — nếu chỉ có 2 mức "thấp/cao" như thiết kế label-conditional cũ (`if is_fraud: ... else: ...`), sẽ mất hết thông tin về *mức độ* rủi ro (giao dịch rủi ro trung bình sẽ bị xử lý giống hệt giao dịch rủi ro cao nhất). Nội suy tuyến tính giữ được gradient này, đúng bản chất "risk score" hơn là "risk label".
 
+## 7a. Nền tảng thuật toán — các phân phối xác suất dùng để sinh field
+
+Phần này giải thích **từ số 0** ý nghĩa của 3 phân phối xác suất dùng trong mục 7, cho người chưa quen thống kê. Nếu đã quen, có thể bỏ qua và đi thẳng mục 8.
+
+**Phân phối Bernoulli** — mô hình cho 1 sự kiện có đúng 2 kết quả (có/không), với xác suất `p` ra kết quả "có". Dùng cho `new_device_flag`, `shipping_billing_mismatch`, và (gián tiếp, qua `match_p`) `ip_country`. Ví dụ: `Bernoulli(p=0.04)` nghĩa là tung 1 "đồng xu lệch" — trung bình 4 trong 100 lần ra "có". Code dùng `rng.binomial(1, p)` (Binomial với 1 lần thử = Bernoulli).
+
+**Phân phối Poisson** — mô hình số lần 1 sự kiện hiếm xảy ra trong 1 khoảng thời gian cố định, với tần suất trung bình `λ` (lambda). Dùng cho `failed_payment_attempts_24h`. Ví dụ: `Poisson(λ=0.15)` nghĩa là trung bình 0,15 lần thất bại/24h cho giao dịch hợp pháp — đa số sẽ ra 0, một số ít ra 1, hiếm khi ra 2+. Đặc điểm quan trọng: Poisson chỉ nhận giá trị nguyên không âm (0, 1, 2...) — đúng bản chất "số lần đếm được", không thể ra số âm hay số thập phân.
+
+**Phân phối Lognormal** — mô hình cho đại lượng dương, lệch phải mạnh (đa số giá trị nhỏ, ít giá trị rất lớn) — tức là `ln(X)` có phân phối chuẩn (Normal). Dùng cho `customer_account_age_days`. Ví dụ: đa số tài khoản có tuổi vài trăm ngày, nhưng vẫn có 1 số tài khoản 10 năm tuổi (3650 ngày) — phân phối Normal thường (có thể ra số âm) không phù hợp với "tuổi tài khoản" (không thể âm), Lognormal giải quyết đúng vấn đề này. Tham số `median` kiểm soát "giá trị trung tâm", `sigma=0.6` kiểm soát độ phân tán (sigma lớn hơn → phân phối trải rộng hơn).
+
+**Vì sao mỗi field dùng đúng 1 loại phân phối này, không loại khác:** kiểu dữ liệu của field quyết định — field nhị phân (có/không) → Bernoulli; field đếm số lần → Poisson; field liên tục dương lệch phải → Lognormal. Đây là lựa chọn phân phối *chuẩn* trong thống kê ứng dụng cho từng loại dữ liệu, không phải chọn tùy ý (xem lại flowchart mục 6).
+
 ## 8. Cơ chế chống leakage — lịch sử phát hiện lỗi và lần chuyển sang label-free
+
+### 8.0. Nền tảng thuật toán — AUC và Cramér's V là gì, vì sao dùng để đo leakage
+
+**AUC (Area Under the ROC Curve)** trả lời câu hỏi: *"nếu lấy ngẫu nhiên 1 dòng fraud và 1 dòng không-fraud, xác suất field này xếp dòng fraud có giá trị cao hơn là bao nhiêu?"* AUC = 0.5 nghĩa là field không phân biệt được gì (tương đương đoán ngẫu nhiên/tung xúc xắc); AUC = 1.0 nghĩa là field phân biệt hoàn hảo 2 nhóm (dòng fraud luôn có giá trị cao hơn mọi dòng không-fraud — đây chính là dấu hiệu leakage, vì không có field thực tế nào "hoàn hảo" như vậy). Trong code, `univariate_auc()` tính `max(AUC, 1-AUC)` — để bắt cả trường hợp field phân biệt "ngược" (dự đoán *không* fraud tốt) cũng đáng ngờ như dự đoán fraud tốt.
+
+**Cramér's V** là bản mở rộng của AUC dùng cho field categorical (không có thứ tự để xếp hạng, ví dụ `browser`, `billing_country`) — đo mức độ liên hệ giữa 2 biến categorical, chuẩn hoá về [0, 1] (0 = độc lập hoàn toàn, 1 = liên hệ hoàn hảo). Tính từ thống kê Chi-squared (χ²) trên bảng contingency (bảng đếm số dòng theo từng cặp giá trị field × `isFraud`).
+
+**Vì sao ngưỡng là 0.75 (AUC) và 0.5 (Cramér's V), không phải 0.9 hay 0.3:** đây là **quyết định thiết kế**, không phải hằng số toán học bắt buộc. Lý do chọn: AUC 0.75 tương đương "có tín hiệu rõ ràng nhưng còn xa mức phân biệt gần-hoàn-hảo" (AUC>0.9 mới là vùng đáng ngờ nặng theo kinh nghiệm thực hành fraud detection); 0.5 cho Cramér's V tương đương mức liên hệ "trung bình-mạnh" trong quy ước Cohen (1988) cho khoa học xã hội. Ngưỡng này được **cố định trước khi chạy check** (trong code, không đổi theo kết quả) — nguyên tắc quan trọng để tránh "di chuyển ngưỡng để cho qua".
+
+**Vì sao Cramér's V cần "hiệu chỉnh bias" (mục 8 dưới):** công thức Cramér's V gốc (sách giáo khoa) có xu hướng báo giá trị **cao giả tạo** khi bảng contingency "thưa" (nhiều giá trị categorical, ít dòng mỗi giá trị) — đây gọi là *small-sample bias*. `device_id` có 50.000 giá trị khác nhau; nếu chạy trên mẫu nhỏ, mỗi giá trị chỉ xuất hiện vài lần → bảng contingency thưa → công thức gốc báo V cao giả tạo dù `device_id` sinh ra hoàn toàn độc lập với fraud theo thiết kế. Công thức hiệu chỉnh (Bergsma, 2013) trừ đi phần "nhiễu do cỡ mẫu nhỏ" trước khi tính V — cho kết quả ổn định hơn theo cỡ mẫu, không báo FAIL giả.
 
 **Quy trình:** sau khi sinh xong, tính **AUC đơn biến** (field numeric/boolean) hoặc **Cramér's V** (field categorical) so với `isFraud`. Ngưỡng FAIL: `AUC ≥ 0.75` hoặc `Cramér's V ≥ 0.5`. Nếu FAIL → giảm hệ số ở mục 7, sinh lại — **không đổi ngưỡng để "cho qua"**. Bước này **vẫn bắt buộc dù pipeline đã label-free** — không đọc `isFraud` không đồng nghĩa không leak (xem cảnh báo mục 2).
 
@@ -283,6 +324,54 @@ Số liệu đầy đủ kèm data type, unit, formula, business assumption: [`d
 | Module 3: "Treat outliers... document all cleaning decisions with before/after comparisons" | `flag_amount_outliers` (Tukey IQR) + `docs/CLEANING_REPORT.md` tự sinh | ✅ |
 | "Originality of code — all code must be authored by team members" | 100% code tự viết (numpy/pandas/Faker), không AutoML/no-code | ✅ |
 
+## 9b. Ví dụ minh hoạ — trace 1 dòng dữ liệu qua toàn bộ pipeline
+
+Để thấy mọi công thức ở trên áp dụng thực tế thế nào, đây là 1 giao dịch giả định đi qua từng bước:
+
+**Input (11 cột gốc từ PaySim):**
+```
+step=170, type=TRANSFER, amount=181000.0,
+oldbalanceOrg=181000.0, newbalanceOrig=0.0, isFraud=1 (chưa dùng lúc sinh)
+```
+
+**Bước 1 — field derived:**
+```
+hour_of_day = (170 - 1) % 24 = 169 % 24 = 1        → 1h sáng
+is_night_transaction = (1 ∈ [0,5]) = True          → đúng, là giờ đêm
+```
+
+**Bước 2 — tính `risk_score` (label-free, không đọc `isFraud`):**
+```
+risky_type = 1          (type = TRANSFER, thuộc {TRANSFER, CASH_OUT})
+amount_percentile = 0.97 (giả sử: amount=181000 nằm ở percentile 97% trong nhóm TRANSFER — rất lớn so với giao dịch TRANSFER thông thường)
+is_night = 1             (hour_of_day=1 ∈ [0,5])
+
+risk_score = (1 + 0.97 + 1) / 3 = 2.97 / 3 = 0.99   → gần 1.0, tức "rủi ro cao" theo observable
+```
+
+**Bước 3 — sinh field conditional dùng `risk_score = 0.99`:**
+```
+new_device_flag:   p = 0.04 + 0.99 × (0.12 - 0.04) = 0.04 + 0.0792 = 0.1192
+                   → Bernoulli(0.1192) → giả sử ra True
+
+failed_payment_attempts_24h: λ = 0.15 + 0.99 × (0.6 - 0.15) = 0.15 + 0.4455 = 0.5955
+                   → Poisson(0.5955) → giả sử ra 1
+
+customer_account_age_days: median = 400 + 0.99 × (275 - 400) = 400 - 123.75 = 276.25 ngày
+                   → Lognormal(ln(276.25), 0.6) → giả sử ra 198 ngày
+```
+
+**Kết quả:** giao dịch này (đúng là fraud thật trong dữ liệu, nhưng code **không hề biết điều đó lúc sinh**) tình cờ có `risk_score` cao vì nó khớp đúng pattern quan sát được (TRANSFER lớn, giờ đêm) — dẫn tới field conditional nghiêng về hướng "giống fraud". Đây chính là cách class-conditional injection hoạt động: **không phải vì code "biết" đây là fraud, mà vì risk proxy tình cờ bắt được đúng loại giao dịch mà fraud thật trong PaySim thường có dạng đó** (TRANSFER/CASH_OUT, giá trị lớn, giờ đêm).
+
+**Bước 4 — sang Phần B (Cleaning), kiểm tra 3 flag:**
+```
+is_amount_outlier: amount=181000 so với Q1/Q3 của toàn bộ amount → giả sử vượt upper_fence → True
+is_zero_amount: amount=181000 ≠ 0 → False
+is_balance_inconsistent: |181000 - 181000 - 0| = 0 ≤ 0.01 → False (khớp đúng công thức rút cạn tài khoản)
+```
+
+Dòng này **không bị xoá** ở bất kỳ bước nào (không missing, không duplicate, category hợp lệ) — chỉ được flag `is_amount_outlier=True`, giữ nguyên trong `transactions_cleaned.parquet`.
+
 ---
 
 # PHẦN B — DATA CLEANING
@@ -319,6 +408,21 @@ flowchart TD
 ```
 
 **Vì sao chọn Flag thay vì xoá:** 16 dòng `amount=0` đều là fraud thật — xoá sẽ mất đúng 16 mẫu fraud hiếm; outlier `amount` lớn có thể là chính tín hiệu fraud mà model cần học; 80% "balance inconsistent" là đặc điểm nguồn dữ liệu, xoá sẽ mất 80% dataset một cách vô lý.
+
+### 12a. Nền tảng thuật toán — Tukey IQR fence là gì (dùng để phát hiện outlier)
+
+**IQR (Interquartile Range)** = khoảng giữa Q1 (giá trị mà 25% dữ liệu nhỏ hơn nó) và Q3 (giá trị mà 75% dữ liệu nhỏ hơn nó): `IQR = Q3 - Q1`. Đây là thước đo "độ phân tán" của phần dữ liệu *giữa* (bỏ qua 25% nhỏ nhất và 25% lớn nhất), nên ít bị ảnh hưởng bởi outlier hơn so với dùng mean/độ lệch chuẩn (std) — chính vì vậy nó phù hợp để *tìm* outlier (nếu dùng std để tìm outlier, outlier tự nó sẽ kéo lệch std, làm việc phát hiện kém chính xác — đây gọi là "masking effect").
+
+**Tukey fence** (John Tukey, thống kê gia, đề xuất trong Exploratory Data Analysis, 1977) định nghĩa "hàng rào" (fence) quanh phần dữ liệu bình thường:
+
+```
+lower_fence = Q1 - 1.5 × IQR
+upper_fence = Q3 + 1.5 × IQR
+
+flag = True  nếu amount < lower_fence  HOẶC  amount > upper_fence
+```
+
+Hệ số `1.5` là quy ước phổ biến nhất (không phải luật vật lý) — tương đương khoảng ±2.7 độ lệch chuẩn nếu dữ liệu phân phối Normal, đủ chặt để bắt được giá trị "khác thường" nhưng không quá nhạy đến mức flag cả những biến động bình thường. Đây là lý do mục 19 ghi "không phải đúng duy nhất" — bước modeling sau có thể cần ngưỡng khác (ví dụ 3.0 thay 1.5 nếu muốn ít nhạy hơn).
 
 ## 13. Kiến trúc pipeline cleaning
 
