@@ -20,6 +20,20 @@ flowchart LR
 
 **Nguồn dữ liệu:** `Data/PS_20174392719_1491204439457_log.csv` — PaySim / Online Payments Fraud Dataset, **6.362.620 dòng, dùng toàn bộ** (không lấy mẫu). Cột gốc: `step, type, amount, nameOrig, oldbalanceOrg, newbalanceOrig, nameDest, oldbalanceDest, newbalanceDest, isFraud, isFlaggedFraud`.
 
+### ✅ Trạng thái xác thực (verify lại được, không phải khẳng định suông)
+
+| Kiểm tra | Kết quả | Lệnh để tự verify lại |
+|---|---|---|
+| Test suite | **82/82 PASS** | `.venv/Scripts/python.exe -m pytest tests/ -v` |
+| Leakage check trên 6.362.620 dòng thật | **13/13 PASS** | `PYTHONPATH=src .venv/Scripts/python.exe -m data_generation.check_leakage` |
+| Không hàm sinh nào đọc `isFraud` | **Xác nhận bằng grep, 0 kết quả sai** | `grep -n "isFraud\|is_fraud" src/data_generation/generate_synthetic_fields.py` |
+| `transactions_synthetic.parquet` | 6.362.620 dòng × **24 cột** | đọc bằng `pandas.read_parquet` |
+| `transactions_cleaned.parquet` | 6.362.620 dòng × **27 cột** — **data final** | đọc bằng `pandas.read_parquet` |
+| Fraud rate giữ nguyên qua cả 2 giai đoạn | 8.213 / 6.362.620 = **0,1291%** | so với file gốc |
+| Code khớp với commit nào | `82d54af` (2026-07-23) | `git log -1` |
+
+Mọi số liệu trong tài liệu này (AUC, số dòng, số cột) đều lấy trực tiếp từ lần chạy thật tương ứng với commit trên — không phải số ước lượng hay copy từ thiết kế ban đầu.
+
 ---
 
 # PHẦN A — SYNTHETIC DATA GENERATION
@@ -357,14 +371,17 @@ tests/data_cleaning/            # 18 unit test
 
 82 test tổng cộng: đúng tỷ lệ base/high-risk theo từng công thức, tái lập được (reproducibility), không tràn kiểu dữ liệu, bất biến toán học kiểm tra exhaustive, schema guard khi đọc CSV, **static check xác nhận không hàm sinh nào nhận `isFraud` làm tham số**, **test hành vi xác nhận đổi `isFraud` giữ observable cố định thì output không đổi**, và với module cleaning: đúng số dòng xoá/flag theo từng kịch bản, không đụng đến dòng không liên quan.
 
-**Cấu trúc file dữ liệu output** (`data/processed/`, đã `.gitignore` do dung lượng lớn):
+**Cấu trúc file dữ liệu output** (`data/processed/`, đã `.gitignore` do dung lượng lớn — mỗi máy phải tự chạy lại mục 18 để tạo, không lấy được qua git):
 
-| File | Giai đoạn | Số dòng | Số cột |
-|---|---|---|---|
-| `transactions_synthetic.parquet` / `.csv` | Sau Phần A | 6.362.620 | 24 |
-| `transactions_synthetic_sample.csv` | Sau Phần A (mẫu) | ~5.000 | 24 |
-| `transactions_cleaned.parquet` / `.csv` | Sau Phần B — **bản cuối cùng** | 6.362.620 | 27 |
-| `transactions_cleaned_sample.csv` | Sau Phần B (mẫu) | ~5.000 | 27 |
+| File | Giai đoạn | Số dòng | Số cột | Vai trò |
+|---|---|---|---|---|
+| **`transactions_cleaned.parquet`** | Sau Phần B | 6.362.620 | 27 | **Data FINAL — dùng cái này cho feature engineering/model, không dùng bản khác** |
+| `transactions_cleaned.csv` | Sau Phần B | 6.362.620 | 27 | Cùng nội dung `.parquet` trên, dạng CSV đầy đủ — chỉ để mở bằng công cụ không đọc được parquet |
+| `transactions_cleaned.zip` | Sau Phần B | 6.362.620 | 27 | Bản nén của `.csv` trên, để chia sẻ/nộp file gọn hơn |
+| `transactions_cleaned_sample.csv` | Sau Phần B | ~5.000 (mẫu stratified) | 27 | **Không phải data final** — chỉ để xem nhanh bằng Excel, không dùng để train |
+| `transactions_synthetic.parquet` | Sau Phần A | 6.362.620 | 24 | Kết quả trung gian (trước cleaning) — input của Phần B, không phải output cuối |
+| `transactions_synthetic.csv` / `.zip` | Sau Phần A | 6.362.620 | 24 | Tương tự bản `.csv`/`.zip` của cleaned, nhưng cho dữ liệu trung gian |
+| `transactions_synthetic_sample.csv` | Sau Phần A | ~5.000 (mẫu stratified) | 24 | Mẫu xem nhanh, không phải data final |
 
 ## 18. Cách chạy end-to-end
 
