@@ -85,6 +85,7 @@ def _valid_category_row(**overrides):
         "is_night_transaction": True,
         "new_device_flag": False,
         "shipping_billing_mismatch": False,
+        "ip_billing_country_mismatch": False,
     }
     row.update(overrides)
     return row
@@ -176,6 +177,7 @@ def _full_schema_row(**overrides):
         "is_night_transaction": True,
         "new_device_flag": False,
         "shipping_billing_mismatch": False,
+        "ip_billing_country_mismatch": False,
     }
     row.update(overrides)
     return row

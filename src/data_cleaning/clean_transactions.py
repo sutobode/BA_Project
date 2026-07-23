@@ -25,7 +25,10 @@ VALID_TRANSACTION_TYPES = {"PAYMENT", "TRANSFER", "CASH_OUT", "CASH_IN", "DEBIT"
 VALID_BROWSERS = set(BROWSER_WEIGHTS.keys())
 VALID_DEVICE_TYPES = set(DEVICE_TYPE_WEIGHTS.keys())
 VALID_COUNTRIES = set(COUNTRY_WEIGHTS.keys())
-BOOLEAN_COLUMNS = ["is_night_transaction", "new_device_flag", "shipping_billing_mismatch"]
+BOOLEAN_COLUMNS = [
+    "is_night_transaction", "new_device_flag", "shipping_billing_mismatch",
+    "ip_billing_country_mismatch",
+]
 
 
 def check_invalid_categories(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, int]:

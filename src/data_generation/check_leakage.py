@@ -66,9 +66,9 @@ FIELD_METADATA: list[dict] = [
     },
     {
         "field_name": "customer_account_age_days", "data_type": "int32", "unit": "days",
-        "valid_range": "[1, 3650]", "generation_type": "conditional-on-fraud",
-        "logic_or_formula": "lognormal(median=400 base / 275 fraud, sigma=0.6), clipped",
-        "business_assumption": "Compromised/mule accounts assumed more often recently created (business assumption, not empirically derived).",
+        "valid_range": "[1, 3650]", "generation_type": "conditional-on-risk-proxy",
+        "logic_or_formula": "lognormal(median=400 at risk_score=0 / 275 at risk_score=1, sigma=0.6), clipped; risk_score = compute_risk_proxy(type, amount, hour_of_day)",
+        "business_assumption": "Compromised/mule accounts assumed more often recently created. Driven by a label-free observable risk proxy (transaction channel, amount percentile within channel, night-time), never by isFraud, so the value is computable for a brand-new transaction at scoring time.",
         "metric_type": "auc",
     },
     {
@@ -94,9 +94,9 @@ FIELD_METADATA: list[dict] = [
     },
     {
         "field_name": "new_device_flag", "data_type": "bool", "unit": "boolean",
-        "valid_range": "{True, False}", "generation_type": "conditional-on-fraud",
-        "logic_or_formula": "Bernoulli(p=0.04 base / 0.12 fraud)",
-        "business_assumption": "Account-takeover fraud plausibly more often from an unrecognized device; odds-ratio capped at 3x (business assumption).",
+        "valid_range": "{True, False}", "generation_type": "conditional-on-risk-proxy",
+        "logic_or_formula": "Bernoulli(p = 0.04 + risk_score * (0.12 - 0.04)); risk_score = compute_risk_proxy(type, amount, hour_of_day)",
+        "business_assumption": "Account-takeover fraud plausibly more often from an unrecognized device; odds-ratio capped at 3x (business assumption). Driven by the label-free risk proxy, not isFraud.",
         "metric_type": "auc",
     },
     {
@@ -108,9 +108,9 @@ FIELD_METADATA: list[dict] = [
     },
     {
         "field_name": "ip_country", "data_type": "category", "unit": "ISO country code",
-        "valid_range": "20 fixed countries", "generation_type": "conditional-on-fraud",
-        "logic_or_formula": "= billing_country with p=0.93 base / 0.80 fraud, else a different country",
-        "business_assumption": "Legit traffic mostly matches home country; fraud has higher (but not certain) mismatch odds since VPNs let fraud spoof location too.",
+        "valid_range": "20 fixed countries", "generation_type": "conditional-on-risk-proxy",
+        "logic_or_formula": "= billing_country with p = 0.93 + risk_score * (0.80 - 0.93), else a different country; risk_score = compute_risk_proxy(type, amount, hour_of_day)",
+        "business_assumption": "Legit traffic mostly matches home country; higher-risk transactions have higher (but not certain) mismatch odds since VPNs let fraud spoof location too. Driven by the label-free risk proxy, not isFraud.",
         "metric_type": "cramers_v",
     },
     {
@@ -121,17 +121,24 @@ FIELD_METADATA: list[dict] = [
         "metric_type": "auc",
     },
     {
+        "field_name": "ip_billing_country_mismatch", "data_type": "bool", "unit": "boolean",
+        "valid_range": "{True, False}", "generation_type": "derived",
+        "logic_or_formula": "ip_country != billing_country",
+        "business_assumption": "Boolean convenience view of the same ip_country/billing_country mismatch already captured numerically by ip_billing_distance_km; provided for teams that need a flag rather than a distance.",
+        "metric_type": "cramers_v",
+    },
+    {
         "field_name": "shipping_billing_mismatch", "data_type": "bool", "unit": "boolean",
-        "valid_range": "{True, False}", "generation_type": "conditional-on-fraud",
-        "logic_or_formula": "Bernoulli(p=0.05 base / 0.15 fraud)",
-        "business_assumption": "Reinterpreted as 'transaction address differs from registered address' given PaySim's account-takeover fraud pattern (not card-present checkout).",
+        "valid_range": "{True, False}", "generation_type": "conditional-on-risk-proxy",
+        "logic_or_formula": "Bernoulli(p = 0.05 + risk_score * (0.15 - 0.05)); risk_score = compute_risk_proxy(type, amount, hour_of_day)",
+        "business_assumption": "Reinterpreted as 'transaction address differs from registered address' given PaySim's account-takeover fraud pattern (not card-present checkout). Driven by the label-free risk proxy, not isFraud.",
         "metric_type": "auc",
     },
     {
         "field_name": "failed_payment_attempts_24h", "data_type": "int16", "unit": "count",
-        "valid_range": "[0, ~10]", "generation_type": "conditional-on-fraud",
-        "logic_or_formula": "Poisson(lambda=0.15 base / 0.6 fraud)",
-        "business_assumption": "Attackers often attempt multiple times before succeeding; odds-ratio capped at 4x (business assumption).",
+        "valid_range": "[0, ~10]", "generation_type": "conditional-on-risk-proxy",
+        "logic_or_formula": "Poisson(lambda = 0.15 + risk_score * (0.6 - 0.15)); risk_score = compute_risk_proxy(type, amount, hour_of_day)",
+        "business_assumption": "Attackers often attempt multiple times before succeeding; odds-ratio capped at 4x (business assumption). Driven by the label-free risk proxy, not isFraud.",
         "metric_type": "auc",
     },
 ]

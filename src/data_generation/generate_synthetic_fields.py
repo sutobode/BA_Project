@@ -35,31 +35,65 @@ def generate_device_id(n: int, device_pool: np.ndarray, rng: np.random.Generator
     return rng.choice(device_pool, size=n)
 
 
-def generate_conditional_bernoulli(
-    is_fraud: np.ndarray, base_p: float, fraud_p: float, rng: np.random.Generator
+RISK_PROXY_TYPES = {"TRANSFER", "CASH_OUT"}
+
+
+def compute_risk_proxy(type_: pd.Series, amount: pd.Series, hour_of_day: pd.Series) -> np.ndarray:
+    """Label-free composite risk proxy in [0, 1], built only from observable
+    transaction attributes available at real-time scoring time. Never reads
+    isFraud, and deliberately never reads oldbalanceOrg/newbalanceOrig - those
+    balance columns near-perfectly determine isFraud in PaySim (fraud = drain
+    the account), so using them would leak the target through the back door.
+
+    Components (equal weight, business assumption - not fit to the label):
+    - risky_type: TRANSFER/CASH_OUT are the only channels PaySim fraud uses,
+      but the vast majority of transactions on these channels are legitimate
+      (fraud rate within them is under 1%), so this is a weak channel-risk
+      heuristic, not a near-deterministic proxy.
+    - amount_percentile: rank of amount within its own transaction type -
+      "unusually large for this channel" is a standard real-world fraud
+      heuristic, independent of PaySim's specific balance-draining mechanism.
+    - is_night: transaction occurs in the 00:00-05:59 window - standard
+      time-of-day risk heuristic.
+    """
+    risky_type = type_.isin(RISK_PROXY_TYPES).astype("float64").to_numpy()
+    amount_percentile = amount.groupby(type_).rank(pct=True).astype("float64").to_numpy()
+    is_night = hour_of_day.between(0, 5).astype("float64").to_numpy()
+    return (risky_type + amount_percentile + is_night) / 3.0
+
+
+def generate_conditional_on_risk(
+    risk_score: np.ndarray, base_p: float, high_risk_p: float, rng: np.random.Generator
 ) -> np.ndarray:
-    p = np.where(is_fraud == 1, fraud_p, base_p)
+    """Label-free: risk_score in [0, 1] comes from compute_risk_proxy(), never
+    from isFraud. Linear interpolation between base_p (risk_score=0) and
+    high_risk_p (risk_score=1) preserves the same bounded odds-ratio as the
+    previous label-conditional design, just driven by an observable proxy."""
+    p = base_p + np.asarray(risk_score) * (high_risk_p - base_p)
     return rng.binomial(1, p).astype(bool)
 
 
 NEW_DEVICE_FLAG_BASE_P = 0.04
-NEW_DEVICE_FLAG_FRAUD_P = 0.12
+NEW_DEVICE_FLAG_HIGH_RISK_P = 0.12
 
 
-def generate_new_device_flag(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    return generate_conditional_bernoulli(is_fraud, NEW_DEVICE_FLAG_BASE_P, NEW_DEVICE_FLAG_FRAUD_P, rng)
+def generate_new_device_flag(risk_score: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    return generate_conditional_on_risk(risk_score, NEW_DEVICE_FLAG_BASE_P, NEW_DEVICE_FLAG_HIGH_RISK_P, rng)
 
 
 ACCOUNT_AGE_BASE_MEDIAN_DAYS = 400
-ACCOUNT_AGE_FRAUD_MEDIAN_DAYS = 275
+ACCOUNT_AGE_HIGH_RISK_MEDIAN_DAYS = 275
 ACCOUNT_AGE_SIGMA = 0.6
 ACCOUNT_AGE_MIN_DAYS = 1
 ACCOUNT_AGE_MAX_DAYS = 3650
 
 
-def generate_account_age_days(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    median = np.where(is_fraud == 1, ACCOUNT_AGE_FRAUD_MEDIAN_DAYS, ACCOUNT_AGE_BASE_MEDIAN_DAYS)
-    mu = np.log(median.astype("float64"))
+def generate_account_age_days(risk_score: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    risk_score = np.asarray(risk_score, dtype="float64")
+    median = ACCOUNT_AGE_BASE_MEDIAN_DAYS + risk_score * (
+        ACCOUNT_AGE_HIGH_RISK_MEDIAN_DAYS - ACCOUNT_AGE_BASE_MEDIAN_DAYS
+    )
+    mu = np.log(median)
     raw = rng.lognormal(mean=mu, sigma=ACCOUNT_AGE_SIGMA)
     clipped = np.clip(raw, ACCOUNT_AGE_MIN_DAYS, ACCOUNT_AGE_MAX_DAYS)
     return clipped.round().astype("int32")
@@ -74,16 +108,17 @@ from data_generation.country_centroids import (
 )
 
 IP_COUNTRY_MATCH_BASE_P = 0.93
-IP_COUNTRY_MATCH_FRAUD_P = 0.80
+IP_COUNTRY_MATCH_HIGH_RISK_P = 0.80
 
 
 def generate_billing_country(n: int, rng: np.random.Generator) -> np.ndarray:
     return generate_categorical(n, COUNTRY_WEIGHTS, rng)
 
 
-def generate_ip_country(billing_country: np.ndarray, is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def generate_ip_country(billing_country: np.ndarray, risk_score: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     n = len(billing_country)
-    match_p = np.where(is_fraud == 1, IP_COUNTRY_MATCH_FRAUD_P, IP_COUNTRY_MATCH_BASE_P)
+    risk_score = np.asarray(risk_score, dtype="float64")
+    match_p = IP_COUNTRY_MATCH_BASE_P + risk_score * (IP_COUNTRY_MATCH_HIGH_RISK_P - IP_COUNTRY_MATCH_BASE_P)
     matches = rng.binomial(1, match_p).astype(bool)
     billing_idx = pd.Series(billing_country).map(COUNTRY_INDEX).to_numpy()
     # Offset by 1..N-1 guarantees a genuinely different country when not matching -
@@ -99,19 +134,20 @@ def generate_ip_billing_distance_km(ip_country: np.ndarray, billing_country: np.
 
 
 SHIPPING_MISMATCH_BASE_P = 0.05
-SHIPPING_MISMATCH_FRAUD_P = 0.15
+SHIPPING_MISMATCH_HIGH_RISK_P = 0.15
 
 
-def generate_shipping_billing_mismatch(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    return generate_conditional_bernoulli(is_fraud, SHIPPING_MISMATCH_BASE_P, SHIPPING_MISMATCH_FRAUD_P, rng)
+def generate_shipping_billing_mismatch(risk_score: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    return generate_conditional_on_risk(risk_score, SHIPPING_MISMATCH_BASE_P, SHIPPING_MISMATCH_HIGH_RISK_P, rng)
 
 
 FAILED_ATTEMPTS_BASE_LAMBDA = 0.15
-FAILED_ATTEMPTS_FRAUD_LAMBDA = 0.6
+FAILED_ATTEMPTS_HIGH_RISK_LAMBDA = 0.6
 
 
-def generate_failed_payment_attempts_24h(is_fraud: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    lam = np.where(is_fraud == 1, FAILED_ATTEMPTS_FRAUD_LAMBDA, FAILED_ATTEMPTS_BASE_LAMBDA)
+def generate_failed_payment_attempts_24h(risk_score: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    risk_score = np.asarray(risk_score, dtype="float64")
+    lam = FAILED_ATTEMPTS_BASE_LAMBDA + risk_score * (FAILED_ATTEMPTS_HIGH_RISK_LAMBDA - FAILED_ATTEMPTS_BASE_LAMBDA)
     return rng.poisson(lam).astype("int16")
 
 
@@ -124,29 +160,38 @@ SAMPLE_SIZE = 5000
 
 
 def generate_all_synthetic_fields(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+    """Label-free: isFraud is never read by any generation function below.
+    Every conditional field is driven by compute_risk_proxy(), a composite
+    score built only from observable transaction attributes (type, amount,
+    hour_of_day) that are available for a brand-new transaction at real-time
+    scoring time - see compute_risk_proxy() docstring for why balance columns
+    are deliberately excluded from the proxy."""
     rng = np.random.default_rng(seed)
     n = len(df)
-    is_fraud = df["isFraud"].to_numpy()
     out = df.copy()
 
     out["hour_of_day"] = generate_hour_of_day(df["step"])
     out["is_night_transaction"] = generate_is_night_transaction(out["hour_of_day"])
-    out["customer_account_age_days"] = generate_account_age_days(is_fraud, rng)
+
+    risk_score = compute_risk_proxy(df["type"], df["amount"], out["hour_of_day"])
+
+    out["customer_account_age_days"] = generate_account_age_days(risk_score, rng)
 
     device_pool = build_device_pool(size=DEVICE_POOL_SIZE, seed=seed)
     out["device_id"] = generate_device_id(n, device_pool, rng)
     out["browser"] = generate_categorical(n, BROWSER_WEIGHTS, rng)
     out["device_type"] = generate_categorical(n, DEVICE_TYPE_WEIGHTS, rng)
-    out["new_device_flag"] = generate_new_device_flag(is_fraud, rng)
+    out["new_device_flag"] = generate_new_device_flag(risk_score, rng)
 
     out["billing_country"] = generate_billing_country(n, rng)
-    out["ip_country"] = generate_ip_country(out["billing_country"].to_numpy(), is_fraud, rng)
+    out["ip_country"] = generate_ip_country(out["billing_country"].to_numpy(), risk_score, rng)
     out["ip_billing_distance_km"] = generate_ip_billing_distance_km(
         out["ip_country"].to_numpy(), out["billing_country"].to_numpy()
     )
+    out["ip_billing_country_mismatch"] = out["ip_country"] != out["billing_country"]
 
-    out["shipping_billing_mismatch"] = generate_shipping_billing_mismatch(is_fraud, rng)
-    out["failed_payment_attempts_24h"] = generate_failed_payment_attempts_24h(is_fraud, rng)
+    out["shipping_billing_mismatch"] = generate_shipping_billing_mismatch(risk_score, rng)
+    out["failed_payment_attempts_24h"] = generate_failed_payment_attempts_24h(risk_score, rng)
 
     return out
 
