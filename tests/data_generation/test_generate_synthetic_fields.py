@@ -225,6 +225,19 @@ def test_generate_all_synthetic_fields_preserves_original_columns_and_row_count(
     assert len(result) == 3
 
 
+def test_generate_all_synthetic_fields_does_not_alter_class_distribution():
+    df = pd.DataFrame({"step": np.arange(1, 1001), "isFraud": [0] * 987 + [1] * 13})
+    result = gsf.generate_all_synthetic_fields(df, seed=42)
+    assert list(result["isFraud"]) == list(df["isFraud"])
+    assert result["isFraud"].mean() == df["isFraud"].mean()
+
+
+def test_generate_all_synthetic_fields_produces_no_duplicate_columns():
+    df = pd.DataFrame({"step": np.arange(1, 201), "isFraud": [0] * 190 + [1] * 10})
+    result = gsf.generate_all_synthetic_fields(df, seed=42)
+    assert not result.columns.duplicated().any()
+
+
 def test_load_raw_transactions_applies_expected_dtypes(tmp_path):
     csv_content = (
         "step,type,amount,nameOrig,oldbalanceOrg,newbalanceOrig,nameDest,oldbalanceDest,newbalanceDest,isFraud,isFlaggedFraud\n"
